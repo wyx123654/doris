@@ -20,15 +20,11 @@ package org.apache.doris.planner.external;
 import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.SlotDescriptor;
 import org.apache.doris.analysis.TupleDescriptor;
-import org.apache.doris.catalog.ArrayType;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.HiveMetaStoreClientHelper;
 import org.apache.doris.catalog.ListPartitionItem;
-import org.apache.doris.catalog.MapType;
 import org.apache.doris.catalog.PartitionItem;
-import org.apache.doris.catalog.StructField;
-import org.apache.doris.catalog.StructType;
 import org.apache.doris.catalog.TableIf;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.catalog.external.HMSExternalTable;
@@ -51,6 +47,7 @@ import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.spi.Split;
 import org.apache.doris.statistics.StatisticalType;
 import org.apache.doris.thrift.TFileAttributes;
+import org.apache.doris.thrift.TFileCompressType;
 import org.apache.doris.thrift.TFileFormatType;
 import org.apache.doris.thrift.TFileTextScanRangeParams;
 import org.apache.doris.thrift.TFileType;
@@ -114,52 +111,7 @@ public class HiveScanNode extends FileQueryScanNode {
         if (HiveVersionUtil.isHive1(hmsTable.getHiveVersion())) {
             genSlotToSchemaIdMap();
         }
-        String inputFormat = hmsTable.getRemoteTable().getSd().getInputFormat();
-        if (inputFormat.contains("TextInputFormat")) {
-            for (SlotDescriptor slot : desc.getSlots()) {
-                if (slot.getType().isScalarType()) {
-                    continue;
-                }
-                boolean supported = true;
 
-                // support Array<primitive_type> and array<array<...>>
-                if (slot.getType().isArrayType()) {
-                    ArrayType arraySubType = (ArrayType) slot.getType();
-                    while (true) {
-                        if (arraySubType.getItemType().isArrayType()) {
-                            arraySubType = (ArrayType) arraySubType.getItemType();
-                            continue;
-                        }
-                        if (!arraySubType.getItemType().isScalarType()) {
-                            supported = false;
-                        }
-                        break;
-                    }
-                } else if (slot.getType().isMapType()) { //support map<primitive_type,primitive_type>
-                    if (!((MapType) slot.getType()).getValueType().isScalarType()) {
-                        supported = false;
-                    }
-                } else if (slot.getType().isStructType()) { //support Struct< primitive_type,primitive_type ... >
-                    StructType structSubType = (StructType) slot.getType();
-                    structSubType.getColumnSize();
-                    for (StructField f : structSubType.getFields()) {
-                        if (!f.getType().isScalarType()) {
-                            supported = false;
-                        }
-                    }
-                }
-
-                if (supported == false) {
-                    throw new UserException("For column `" + slot.getColumn().getName()
-                            + "`, The column types are not supported yet"
-                            + " for text input format of Hive.\n"
-                            + "For complex type ,now Support :\n"
-                            + "\t1. array< primitive_type > and array< array< ... > >\n"
-                            + "\t2. map< primitive_type , primitive_type >\n"
-                            + "\t3. Struct< primitive_type , primitive_type ... >\n");
-                }
-            }
-        }
         if (hmsTable.isHiveTransactionalTable()) {
             this.hiveTransaction = new HiveTransaction(DebugUtil.printId(ConnectContext.get().queryId()),
                     ConnectContext.get().getQualifiedUser(), hmsTable, hmsTable.isFullAcidTable());
@@ -184,18 +136,22 @@ public class HiveScanNode extends FileQueryScanNode {
                         hmsTable.getDbName(), hmsTable.getName(), partitionColumnTypes);
                 Map<Long, PartitionItem> idToPartitionItem = hivePartitionValues.getIdToPartitionItem();
                 this.totalPartitionNum = idToPartitionItem.size();
-                ListPartitionPrunerV2 pruner = new ListPartitionPrunerV2(idToPartitionItem,
-                        hmsTable.getPartitionColumns(), columnNameToRange,
-                        hivePartitionValues.getUidToPartitionRange(),
-                        hivePartitionValues.getRangeToId(),
-                        hivePartitionValues.getSingleColumnRangeMap(),
-                        true);
-                Collection<Long> filteredPartitionIds = pruner.prune();
-                LOG.debug("hive partition fetch and prune for table {}.{} cost: {} ms",
-                        hmsTable.getDbName(), hmsTable.getName(), (System.currentTimeMillis() - start));
-                partitionItems = Lists.newArrayListWithCapacity(filteredPartitionIds.size());
-                for (Long id : filteredPartitionIds) {
-                    partitionItems.add(idToPartitionItem.get(id));
+                if (!conjuncts.isEmpty()) {
+                    ListPartitionPrunerV2 pruner = new ListPartitionPrunerV2(idToPartitionItem,
+                            hmsTable.getPartitionColumns(), columnNameToRange,
+                            hivePartitionValues.getUidToPartitionRange(),
+                            hivePartitionValues.getRangeToId(),
+                            hivePartitionValues.getSingleColumnRangeMap(),
+                            true);
+                    Collection<Long> filteredPartitionIds = pruner.prune();
+                    LOG.debug("hive partition fetch and prune for table {}.{} cost: {} ms",
+                            hmsTable.getDbName(), hmsTable.getName(), (System.currentTimeMillis() - start));
+                    partitionItems = Lists.newArrayListWithCapacity(filteredPartitionIds.size());
+                    for (Long id : filteredPartitionIds) {
+                        partitionItems.add(idToPartitionItem.get(id));
+                    }
+                } else {
+                    partitionItems = idToPartitionItem.values();
                 }
             } else {
                 // partitions has benn pruned by Nereids, in PruneFileScanPartition,
@@ -209,7 +165,8 @@ public class HiveScanNode extends FileQueryScanNode {
             // get partitions from cache
             List<List<String>> partitionValuesList = Lists.newArrayListWithCapacity(partitionItems.size());
             for (PartitionItem item : partitionItems) {
-                partitionValuesList.add(((ListPartitionItem) item).getItems().get(0).getPartitionValuesAsStringList());
+                partitionValuesList.add(
+                        ((ListPartitionItem) item).getItems().get(0).getPartitionValuesAsStringListForHive());
             }
             resPartitions = cache.getAllPartitionsWithCache(hmsTable.getDbName(), hmsTable.getName(),
                     partitionValuesList);
@@ -330,7 +287,7 @@ public class HiveScanNode extends FileQueryScanNode {
 
     @Override
     protected Map<String, String> getLocationProperties() throws UserException  {
-        return hmsTable.getCatalogProperties();
+        return hmsTable.getHadoopProperties();
     }
 
     @Override
@@ -385,5 +342,15 @@ public class HiveScanNode extends FileQueryScanNode {
     @Override
     public boolean pushDownAggNoGroupingCheckCol(FunctionCallExpr aggExpr, Column col) {
         return !col.isAllowNull();
+    }
+
+    @Override
+    protected TFileCompressType getFileCompressType(FileSplit fileSplit) throws UserException {
+        TFileCompressType compressType = super.getFileCompressType(fileSplit);
+        // hadoop use lz4 blocked codec
+        if (compressType == TFileCompressType.LZ4FRAME) {
+            compressType = TFileCompressType.LZ4BLOCK;
+        }
+        return compressType;
     }
 }

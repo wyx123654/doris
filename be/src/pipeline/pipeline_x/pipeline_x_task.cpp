@@ -44,15 +44,12 @@ namespace doris::pipeline {
 
 PipelineXTask::PipelineXTask(PipelinePtr& pipeline, uint32_t index, RuntimeState* state,
                              PipelineFragmentContext* fragment_context,
-                             RuntimeProfile* parent_profile,
-                             const std::vector<TScanRangeParams>& scan_ranges, const int sender_id)
+                             RuntimeProfile* parent_profile)
         : PipelineTask(pipeline, index, state, fragment_context, parent_profile),
-          _scan_ranges(scan_ranges),
           _operators(pipeline->operator_xs()),
           _source(_operators.front()),
           _root(_operators.back()),
-          _sink(pipeline->sink_shared_pointer()),
-          _sender_id(sender_id) {
+          _sink(pipeline->sink_shared_pointer()) {
     _pipeline_task_watcher.start();
     _sink->get_dependency(_downstream_dependency);
 }
@@ -94,20 +91,11 @@ Status PipelineXTask::_open() {
     SCOPED_TIMER(_task_profile->total_time_counter());
     SCOPED_CPU_TIMER(_task_cpu_timer);
     SCOPED_TIMER(_open_timer);
-    Status st = Status::OK();
+    _dry_run = _sink->should_dry_run(_state);
     for (auto& o : _operators) {
-        Dependency* dep = _upstream_dependency.find(o->id()) == _upstream_dependency.end()
-                                  ? (Dependency*)nullptr
-                                  : _upstream_dependency.find(o->id())->second.get();
-        LocalStateInfo info {_scan_ranges, dep};
-        Status cur_st = o->setup_local_state(_state, info);
-        if (!cur_st.ok()) {
-            st = cur_st;
-        }
+        RETURN_IF_ERROR(_state->get_local_state(o->id())->open(_state));
     }
-    LocalSinkStateInfo info {_sender_id, _downstream_dependency.get()};
-    RETURN_IF_ERROR(_sink->setup_local_state(_state, info));
-    RETURN_IF_ERROR(st);
+    RETURN_IF_ERROR(_state->get_sink_local_state(_sink->id())->open(_state));
     _opened = true;
     return Status::OK();
 }
@@ -142,23 +130,23 @@ Status PipelineXTask::execute(bool* eos) {
             set_state(PipelineTaskState::BLOCKED_FOR_DEPENDENCY);
             return Status::OK();
         }
-        if (!_source->can_read(_state)) {
+        if (!source_can_read()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SOURCE);
             return Status::OK();
         }
-        if (!_sink->can_write(_state)) {
+        if (!sink_can_write()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SINK);
             return Status::OK();
         }
     }
 
-    this->set_begin_execute_time();
+    set_begin_execute_time();
     while (!_fragment_context->is_canceled()) {
-        if (_data_state != SourceState::MORE_DATA && !_source->can_read(_state)) {
+        if (_data_state != SourceState::MORE_DATA && !source_can_read()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SOURCE);
             break;
         }
-        if (!_sink->can_write(_state)) {
+        if (!sink_can_write()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SINK);
             break;
         }
@@ -172,11 +160,14 @@ Status PipelineXTask::execute(bool* eos) {
         auto* block = _block.get();
 
         // Pull block from operator chain
-        {
+        if (!_dry_run) {
             SCOPED_TIMER(_get_block_timer);
             _get_block_counter->update(1);
             RETURN_IF_ERROR(_root->get_next_after_projects(_state, block, _data_state));
+        } else {
+            _data_state = SourceState::FINISHED;
         }
+
         *eos = _data_state == SourceState::FINISHED;
         if (_block->rows() != 0 || *eos) {
             SCOPED_TIMER(_sink_timer);
@@ -246,6 +237,8 @@ std::string PipelineXTask::debug_string() {
     fmt::memory_buffer debug_string_buffer;
 
     fmt::format_to(debug_string_buffer, "QueryId: {}\n", print_id(query_context()->query_id()));
+    fmt::format_to(debug_string_buffer, "InstanceId: {}\n",
+                   print_id(_state->fragment_instance_id()));
 
     fmt::format_to(debug_string_buffer, "RuntimeUsage: {}\n",
                    PrettyPrinter::print(get_runtime_ns(), TUnit::TIME_NS));
@@ -259,14 +252,16 @@ std::string PipelineXTask::debug_string() {
                    "PipelineTask[this = {}, state = {}]\noperators: ", (void*)this,
                    get_state_name(_cur_state));
     for (size_t i = 0; i < _operators.size(); i++) {
-        fmt::format_to(debug_string_buffer, "\n{}{}", std::string(i * 2, ' '),
-                       _operators[i]->debug_string());
+        fmt::format_to(
+                debug_string_buffer, "\n{}",
+                _opened ? _operators[i]->debug_string(_state, i) : _operators[i]->debug_string(i));
         std::stringstream profile_ss;
         _operators[i]->get_runtime_profile()->pretty_print(&profile_ss, std::string(i * 2, ' '));
         fmt::format_to(debug_string_buffer, "\n{}", profile_ss.str());
     }
-    fmt::format_to(debug_string_buffer, "\n{}{}", std::string(_operators.size() * 2, ' '),
-                   _sink->debug_string());
+    fmt::format_to(debug_string_buffer, "\n{}",
+                   _opened ? _sink->debug_string(_state, _operators.size())
+                           : _sink->debug_string(_operators.size()));
     {
         std::stringstream profile_ss;
         _sink->get_runtime_profile()->pretty_print(&profile_ss,

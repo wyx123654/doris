@@ -21,6 +21,25 @@
 
 namespace doris::pipeline {
 
+template Status HashJoinDependency::extract_join_column<true>(
+        vectorized::Block&,
+        COW<vectorized::IColumn>::mutable_ptr<vectorized::ColumnVector<unsigned char>>&,
+        std::vector<vectorized::IColumn const*, std::allocator<vectorized::IColumn const*>>&,
+        std::vector<int, std::allocator<int>> const&);
+
+template Status HashJoinDependency::extract_join_column<false>(
+        vectorized::Block&,
+        COW<vectorized::IColumn>::mutable_ptr<vectorized::ColumnVector<unsigned char>>&,
+        std::vector<vectorized::IColumn const*, std::allocator<vectorized::IColumn const*>>&,
+        std::vector<int, std::allocator<int>> const&);
+
+std::string Dependency::debug_string(int indentation_level) const {
+    fmt::memory_buffer debug_string_buffer;
+    fmt::format_to(debug_string_buffer, "{}{}: id={}, done={}",
+                   std::string(indentation_level * 2, ' '), _name, _id, _done.load());
+    return fmt::to_string(debug_string_buffer);
+}
+
 Status AggDependency::reset_hash_table() {
     return std::visit(
             [&](auto&& agg_method) {
@@ -181,7 +200,7 @@ vectorized::BlockRowPos AnalyticDependency::compare_row_to_find_end(int idx,
     }
     //binary search, set start and end pos
     int64_t start_pos = start_init_row_num;
-    int64_t end_pos = _analytic_state.input_blocks[start.block_num].rows() - 1;
+    int64_t end_pos = _analytic_state.input_blocks[start.block_num].rows();
     //if end_block_num haven't moved, only start_block_num go to the end block
     //so could use the end.row_num for binary search
     if (start.block_num == end.block_num) {
@@ -215,6 +234,75 @@ bool AnalyticDependency::whether_need_next_partition(vectorized::BlockRowPos fou
         return true;
     }
     return false;
+}
+
+Status HashJoinDependency::do_evaluate(vectorized::Block& block,
+                                       vectorized::VExprContextSPtrs& exprs,
+                                       RuntimeProfile::Counter& expr_call_timer,
+                                       std::vector<int>& res_col_ids) {
+    for (size_t i = 0; i < exprs.size(); ++i) {
+        int result_col_id = -1;
+        // execute build column
+        {
+            SCOPED_TIMER(&expr_call_timer);
+            RETURN_IF_ERROR(exprs[i]->execute(&block, &result_col_id));
+        }
+
+        // TODO: opt the column is const
+        block.get_by_position(result_col_id).column =
+                block.get_by_position(result_col_id).column->convert_to_full_column_if_const();
+        res_col_ids[i] = result_col_id;
+    }
+    return Status::OK();
+}
+
+std::vector<uint16_t> HashJoinDependency::convert_block_to_null(vectorized::Block& block) {
+    std::vector<uint16_t> results;
+    for (int i = 0; i < block.columns(); ++i) {
+        if (auto& column_type = block.safe_get_by_position(i); !column_type.type->is_nullable()) {
+            DCHECK(!column_type.column->is_nullable());
+            column_type.column = make_nullable(column_type.column);
+            column_type.type = make_nullable(column_type.type);
+            results.emplace_back(i);
+        }
+    }
+    return results;
+}
+
+template <bool BuildSide>
+Status HashJoinDependency::extract_join_column(vectorized::Block& block,
+                                               vectorized::ColumnUInt8::MutablePtr& null_map,
+                                               vectorized::ColumnRawPtrs& raw_ptrs,
+                                               const std::vector<int>& res_col_ids) {
+    for (size_t i = 0; i < _join_state.build_exprs_size; ++i) {
+        if (_join_state.is_null_safe_eq_join[i]) {
+            raw_ptrs[i] = block.get_by_position(res_col_ids[i]).column.get();
+        } else {
+            auto column = block.get_by_position(res_col_ids[i]).column.get();
+            if (auto* nullable = check_and_get_column<vectorized::ColumnNullable>(*column)) {
+                auto& col_nested = nullable->get_nested_column();
+                auto& col_nullmap = nullable->get_null_map_data();
+
+                if constexpr (!BuildSide) {
+                    DCHECK(null_map != nullptr);
+                    vectorized::VectorizedUtils::update_null_map(null_map->get_data(), col_nullmap);
+                }
+                if (_join_state.store_null_in_hash_table[i]) {
+                    raw_ptrs[i] = nullable;
+                } else {
+                    if constexpr (BuildSide) {
+                        DCHECK(null_map != nullptr);
+                        vectorized::VectorizedUtils::update_null_map(null_map->get_data(),
+                                                                     col_nullmap);
+                    }
+                    raw_ptrs[i] = &col_nested;
+                }
+            } else {
+                raw_ptrs[i] = column;
+            }
+        }
+    }
+    return Status::OK();
 }
 
 } // namespace doris::pipeline

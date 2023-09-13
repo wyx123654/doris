@@ -19,6 +19,8 @@
 
 #include "pipeline/exec/data_queue.h"
 #include "vec/common/sort/sorter.h"
+#include "vec/exec/join/process_hash_table_probe.h"
+#include "vec/exec/join/vhash_join_node.h"
 #include "vec/exec/vaggregation_node.h"
 #include "vec/exec/vanalytic_eval_node.h"
 
@@ -29,7 +31,7 @@ using DependencySPtr = std::shared_ptr<Dependency>;
 
 class Dependency {
 public:
-    Dependency(int id) : _id(id), _done(false) {}
+    Dependency(int id, std::string name) : _id(id), _name(name), _done(false) {}
     virtual ~Dependency() = default;
 
     [[nodiscard]] bool done() const { return _done; }
@@ -38,9 +40,20 @@ public:
     virtual void* shared_state() = 0;
     [[nodiscard]] int id() const { return _id; }
 
+    virtual std::string debug_string(int indentation_level = 0) const;
+
 private:
     int _id;
+    std::string _name;
     std::atomic<bool> _done;
+};
+
+struct FakeSharedState {};
+struct FakeDependency : public Dependency {
+public:
+    FakeDependency(int id) : Dependency(0, "FakeDependency") {}
+    using SharedState = FakeSharedState;
+    void* shared_state() override { return nullptr; }
 };
 
 struct AggSharedState {
@@ -71,7 +84,8 @@ public:
 
 class AggDependency final : public Dependency {
 public:
-    AggDependency(int id) : Dependency(id) {
+    using SharedState = AggSharedState;
+    AggDependency(int id) : Dependency(id, "AggDependency") {
         _mem_tracker = std::make_unique<MemTracker>("AggregateOperator:");
     }
     ~AggDependency() override = default;
@@ -134,7 +148,8 @@ public:
 
 class SortDependency final : public Dependency {
 public:
-    SortDependency(int id) : Dependency(id) {}
+    using SharedState = SortSharedState;
+    SortDependency(int id) : Dependency(id, "SortDependency") {}
     ~SortDependency() override = default;
     void* shared_state() override { return (void*)&_sort_state; };
 
@@ -167,7 +182,8 @@ public:
 
 class AnalyticDependency final : public Dependency {
 public:
-    AnalyticDependency(int id) : Dependency(id) {}
+    using SharedState = AnalyticSharedState;
+    AnalyticDependency(int id) : Dependency(id, "AnalyticDependency") {}
     ~AnalyticDependency() override = default;
 
     void* shared_state() override { return (void*)&_analytic_state; };
@@ -181,6 +197,78 @@ public:
 
 private:
     AnalyticSharedState _analytic_state;
+};
+
+struct JoinSharedState {
+    // For some join case, we can apply a short circuit strategy
+    // 1. _short_circuit_for_null_in_probe_side = true
+    // 2. build side rows is empty, Join op is: inner join/right outer join/left semi/right semi/right anti
+    bool short_circuit_for_probe = false;
+    vectorized::JoinOpVariants join_op_variants;
+};
+
+struct HashJoinSharedState : public JoinSharedState {
+    // mark the join column whether support null eq
+    std::vector<bool> is_null_safe_eq_join;
+    // mark the build hash table whether it needs to store null value
+    std::vector<bool> store_null_in_hash_table;
+    std::shared_ptr<vectorized::Arena> arena = std::make_shared<vectorized::Arena>();
+
+    // maybe share hash table with other fragment instances
+    std::shared_ptr<vectorized::HashTableVariants> hash_table_variants =
+            std::make_shared<vectorized::HashTableVariants>();
+    // for full/right outer join
+    vectorized::HashTableIteratorVariants outer_join_pull_visited_iter;
+    vectorized::HashTableIteratorVariants probe_row_match_iter;
+    vectorized::Sizes probe_key_sz;
+    const std::vector<TupleDescriptor*> build_side_child_desc;
+    size_t build_exprs_size = 0;
+    std::shared_ptr<std::vector<vectorized::Block>> build_blocks =
+            std::make_shared<std::vector<vectorized::Block>>();
+};
+
+class HashJoinDependency final : public Dependency {
+public:
+    using SharedState = HashJoinSharedState;
+    HashJoinDependency(int id) : Dependency(id, "HashJoinDependency") {}
+    ~HashJoinDependency() override = default;
+
+    void* shared_state() override { return (void*)&_join_state; }
+
+    Status do_evaluate(vectorized::Block& block, vectorized::VExprContextSPtrs& exprs,
+                       RuntimeProfile::Counter& expr_call_timer, std::vector<int>& res_col_ids);
+
+    std::vector<uint16_t> convert_block_to_null(vectorized::Block& block);
+
+    template <bool BuildSide>
+    Status extract_join_column(vectorized::Block& block,
+                               vectorized::ColumnUInt8::MutablePtr& null_map,
+                               vectorized::ColumnRawPtrs& raw_ptrs,
+                               const std::vector<int>& res_col_ids);
+
+private:
+    HashJoinSharedState _join_state;
+};
+
+struct NestedLoopJoinSharedState : public JoinSharedState {
+    // if true, left child has no more rows to process
+    bool left_side_eos = false;
+    // Visited flags for each row in build side.
+    vectorized::MutableColumns build_side_visited_flags;
+    // List of build blocks, constructed in prepare()
+    vectorized::Blocks build_blocks;
+};
+
+class NestedLoopJoinDependency final : public Dependency {
+public:
+    using SharedState = NestedLoopJoinSharedState;
+    NestedLoopJoinDependency(int id) : Dependency(id, "NestedLoopJoinDependency") {}
+    ~NestedLoopJoinDependency() override = default;
+
+    void* shared_state() override { return (void*)&_join_state; }
+
+private:
+    NestedLoopJoinSharedState _join_state;
 };
 
 } // namespace pipeline
