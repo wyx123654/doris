@@ -248,15 +248,17 @@ Status DistinctStreamingAggSinkOperatorX::sink(RuntimeState* state, vectorized::
     return Status::OK();
 }
 
-Status DistinctStreamingAggSinkLocalState::close(RuntimeState* state) {
+Status DistinctStreamingAggSinkLocalState::close(RuntimeState* state, Status exec_status) {
     if (_closed) {
         return Status::OK();
     }
+    SCOPED_TIMER(profile()->total_time_counter());
+    SCOPED_TIMER(_close_timer);
     if (_shared_state->data_queue && !_shared_state->data_queue->is_finish()) {
         // finish should be set, if not set here means error.
         _shared_state->data_queue->set_canceled();
     }
-    return Base::close(state);
+    return Base::close(state, exec_status);
 }
 
 } // namespace doris::pipeline
