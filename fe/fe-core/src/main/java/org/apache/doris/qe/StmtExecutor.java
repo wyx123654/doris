@@ -885,8 +885,9 @@ public class StmtExecutor {
         if (!context.getSessionVariable().enableProfile()) {
             return;
         }
+
         profile.update(context.startTime, getSummaryInfo(isFinished), isFinished,
-                context.getSessionVariable().enableSimplyProfile);
+                context.getSessionVariable().profileLevel, this.planner);
     }
 
     // Analyze one statement to structure in memory.
@@ -2327,7 +2328,6 @@ public class StmtExecutor {
 
     private void handleExportStmt() throws Exception {
         ExportStmt exportStmt = (ExportStmt) parsedStmt;
-        // context.getEnv().getExportMgr().addExportJob(exportStmt);
         context.getEnv().getExportMgr().addExportJobAndRegisterTask(exportStmt.getExportJob());
     }
 
@@ -2758,6 +2758,13 @@ public class StmtExecutor {
 
     public OriginStatement getOriginStmt() {
         return originStmt;
+    }
+
+    public String getOriginStmtInString() {
+        if (originStmt != null && originStmt.originStmt != null) {
+            return originStmt.originStmt;
+        }
+        return "";
     }
 }
 
