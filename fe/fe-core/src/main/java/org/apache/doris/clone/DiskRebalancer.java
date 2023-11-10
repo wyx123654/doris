@@ -17,6 +17,7 @@
 
 package org.apache.doris.clone;
 
+import org.apache.doris.catalog.CatalogRecycleBin;
 import org.apache.doris.catalog.DataProperty;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Env;
@@ -28,6 +29,8 @@ import org.apache.doris.clone.SchedException.Status;
 import org.apache.doris.clone.TabletSchedCtx.BalanceType;
 import org.apache.doris.clone.TabletSchedCtx.Priority;
 import org.apache.doris.clone.TabletScheduler.PathSlot;
+import org.apache.doris.common.Config;
+import org.apache.doris.common.FeConstants;
 import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TStorageMedium;
 
@@ -117,6 +120,7 @@ public class DiskRebalancer extends Rebalancer {
     @Override
     protected List<TabletSchedCtx> selectAlternativeTabletsForCluster(
             LoadStatisticForTag clusterStat, TStorageMedium medium) {
+        LOG.info("dx test enter selectAlternativeTabletsForCluster");
         List<TabletSchedCtx> alternativeTablets = Lists.newArrayList();
 
         // get classification of backends
@@ -125,7 +129,14 @@ public class DiskRebalancer extends Rebalancer {
         List<BackendLoadStatistic> highBEs = Lists.newArrayList();
         clusterStat.getBackendStatisticByClass(lowBEs, midBEs, highBEs, medium);
 
-        if (!(lowBEs.isEmpty() && highBEs.isEmpty())) {
+        if (Config.tablet_rebalancer_type.equalsIgnoreCase("partition")) {
+            PartitionRebalancer rebalancer = (PartitionRebalancer) Env.getCurrentEnv()
+                    .getTabletScheduler().getRebalancer();
+            if (rebalancer != null && rebalancer.checkCacheEmptyForLong()) {
+                midBEs.addAll(lowBEs);
+                midBEs.addAll(highBEs);
+            }
+        } else if (!(lowBEs.isEmpty() && highBEs.isEmpty())) {
             // the cluster is not balanced
             if (prioBackends.isEmpty()) {
                 LOG.info("cluster is not balanced with medium: {}. skip", medium);
@@ -142,16 +153,22 @@ public class DiskRebalancer extends Rebalancer {
         // if all mid backends is not available, we should not start balance
         if (midBEs.stream().noneMatch(BackendLoadStatistic::isAvailable)) {
             LOG.debug("all mid load backends is dead: {} with medium: {}. skip",
-                    lowBEs.stream().mapToLong(BackendLoadStatistic::getBeId).toArray(), medium);
+                    midBEs.stream().mapToLong(BackendLoadStatistic::getBeId).toArray(), medium);
             return alternativeTablets;
         }
 
         if (midBEs.stream().noneMatch(BackendLoadStatistic::hasAvailDisk)) {
             LOG.info("all mid load backends {} have no available disk with medium: {}. skip",
-                    lowBEs.stream().mapToLong(BackendLoadStatistic::getBeId).toArray(), medium);
+                    midBEs.stream().mapToLong(BackendLoadStatistic::getBeId).toArray(), medium);
             return alternativeTablets;
         }
 
+        // Clone ut mocked env, but CatalogRecycleBin is not mockable (it extends from Thread)
+        // so in clone ut recycleBin need to set to null.
+        CatalogRecycleBin recycleBin = null;
+        if (!FeConstants.runningUnitTest) {
+            recycleBin = Env.getCurrentRecycleBin();
+        }
         Set<Long> alternativeTabletIds = Sets.newHashSet();
         Set<Long> unbalancedBEs = Sets.newHashSet();
         // choose tablets from backends randomly.
@@ -169,7 +186,17 @@ public class DiskRebalancer extends Rebalancer {
             Set<Long> pathHigh = Sets.newHashSet();
             // we only select tablets from available high load path
             beStat.getPathStatisticByClass(pathLow, pathMid, pathHigh, medium);
+            LOG.info("dx test select before low={} mid={} high={} medium={}", pathLow, pathMid, pathHigh, medium);
             // check if BE has low and high paths for balance after reclassification
+            pathHigh.add(-2606726262674133323L);
+            pathHigh.add(384536254535458899L);
+            pathHigh.add(528047762753362128L);
+            pathLow.add(1252949013258184268L);
+            pathMid.remove(384536254535458899L);
+            pathMid.remove(528047762753362128L);
+            pathMid.remove(-2606726262674133323L);
+            pathMid.remove(1252949013258184268L);
+            LOG.info("dx test select after low={} mid={} high={} medium={}", pathLow, pathMid, pathHigh, medium);
             if (!checkAndReclassifyPaths(pathLow, pathMid, pathHigh)) {
                 continue;
             }
@@ -214,6 +241,10 @@ public class DiskRebalancer extends Rebalancer {
                     if (tabletMeta == null) {
                         continue;
                     }
+                    if (recycleBin != null && recycleBin.isRecyclePartition(tabletMeta.getDbId(),
+                            tabletMeta.getTableId(), tabletMeta.getPartitionId())) {
+                        continue;
+                    }
 
                     TabletSchedCtx tabletCtx = new TabletSchedCtx(TabletSchedCtx.Type.BALANCE,
                             tabletMeta.getDbId(), tabletMeta.getTableId(), tabletMeta.getPartitionId(),
@@ -253,6 +284,7 @@ public class DiskRebalancer extends Rebalancer {
                     medium, alternativeTablets.size(),
                     alternativeTablets.stream().mapToLong(TabletSchedCtx::getTabletId).toArray());
         }
+        LOG.info("dx test out selectAlternativeTabletsForCluster, alternativeTablets={}", alternativeTablets);
         return alternativeTablets;
     }
 
@@ -264,6 +296,7 @@ public class DiskRebalancer extends Rebalancer {
      */
     @Override
     public void completeSchedCtx(TabletSchedCtx tabletCtx) throws SchedException {
+        LOG.info("dx test enter completeSchedCtx");
         LoadStatisticForTag clusterStat = statisticMap.get(tabletCtx.getTag());
         if (clusterStat == null) {
             throw new SchedException(Status.UNRECOVERABLE,
@@ -320,6 +353,18 @@ public class DiskRebalancer extends Rebalancer {
         Set<Long> pathMid = Sets.newHashSet();
         Set<Long> pathHigh = Sets.newHashSet();
         beStat.getPathStatisticByClass(pathLow, pathMid, pathHigh, tabletCtx.getStorageMedium());
+        LOG.info("dx test complete before low={} mid={} high={} medium={}",
+                pathLow, pathMid, pathHigh, tabletCtx.getStorageMedium());
+        pathHigh.add(-2606726262674133323L);
+        pathHigh.add(384536254535458899L);
+        pathHigh.add(528047762753362128L);
+        pathLow.add(1252949013258184268L);
+        pathMid.remove(384536254535458899L);
+        pathMid.remove(528047762753362128L);
+        pathMid.remove(-2606726262674133323L);
+        pathMid.remove(1252949013258184268L);
+        LOG.info("dx test complete after low={} mid={} high={} medium={}",
+                pathLow, pathMid, pathHigh, tabletCtx.getStorageMedium());
         if (pathHigh.contains(replica.getPathHash())) {
             pathLow.addAll(pathMid);
         } else if (!pathMid.contains(replica.getPathHash())) {
@@ -362,5 +407,6 @@ public class DiskRebalancer extends Rebalancer {
         if (!setDest) {
             throw new SchedException(Status.UNRECOVERABLE, "unable to find low load path");
         }
+        LOG.info("dx test out completeSchedCtx");
     }
 }

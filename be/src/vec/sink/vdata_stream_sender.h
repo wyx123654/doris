@@ -46,6 +46,7 @@
 #include "util/uid_util.h"
 #include "vec/core/block.h"
 #include "vec/exprs/vexpr_context.h"
+#include "vec/runtime/partitioner.h"
 #include "vec/runtime/vdata_stream_recvr.h"
 
 namespace doris {
@@ -64,7 +65,7 @@ enum CompressionTypePB : int;
 namespace pipeline {
 class ExchangeSinkOperator;
 class ExchangeSinkOperatorX;
-class ChannelDependency;
+class LocalExchangeChannelDependency;
 } // namespace pipeline
 
 namespace vectorized {
@@ -93,6 +94,13 @@ private:
 
     bool _is_local;
     const int _batch_size;
+};
+
+struct ShuffleChannelIds {
+    template <typename HashValueType>
+    HashValueType operator()(HashValueType l, size_t r) {
+        return l % r;
+    }
 };
 
 class VDataStreamSender : public DataSink {
@@ -138,6 +146,7 @@ public:
     }
     MemTracker* mem_tracker() { return _mem_tracker.get(); }
     QueryStatistics* query_statistics() { return _query_statistics.get(); }
+    QueryStatisticsPtr query_statisticsPtr() { return _query_statistics; }
     bool transfer_large_data_by_brpc() { return _transfer_large_data_by_brpc; }
     RuntimeProfile::Counter* merge_block_timer() { return _merge_block_timer; }
     segment_v2::CompressionTypePB& compression_type() { return _compression_type; }
@@ -151,17 +160,10 @@ protected:
     void _roll_pb_block();
     Status _get_next_available_buffer(BroadcastPBlockHolder** holder);
 
-    Status get_partition_column_result(Block* block, int* result) const {
-        int counter = 0;
-        for (auto ctx : _partition_expr_ctxs) {
-            RETURN_IF_ERROR(ctx->execute(block, &result[counter++]));
-        }
-        return Status::OK();
-    }
-
-    template <typename Channels>
+    template <typename Channels, typename HashValueType>
     Status channel_add_rows(RuntimeState* state, Channels& channels, int num_channels,
-                            const uint64_t* channel_ids, int rows, Block* block, bool eos);
+                            const HashValueType* __restrict channel_ids, int rows, Block* block,
+                            bool eos);
 
     template <typename ChannelPtrType>
     void _handle_eof_channel(RuntimeState* state, ChannelPtrType channel, Status st);
@@ -186,8 +188,8 @@ protected:
     std::vector<BroadcastPBlockHolder> _broadcast_pb_blocks;
     int _broadcast_pb_block_idx;
 
-    // compute per-row partition values
-    VExprContextSPtrs _partition_expr_ctxs;
+    std::unique_ptr<PartitionerBase> _partitioner;
+    size_t _partition_count;
 
     std::vector<Channel<VDataStreamSender>*> _channels;
     std::vector<std::shared_ptr<Channel<VDataStreamSender>>> _channel_shared_ptrs;
@@ -276,8 +278,7 @@ public:
     virtual Status send_remote_block(PBlock* block, bool eos = false,
                                      Status exec_status = Status::OK());
 
-    virtual Status send_broadcast_block(BroadcastPBlockHolder* block, [[maybe_unused]] bool* sent,
-                                        bool eos = false) {
+    virtual Status send_broadcast_block(BroadcastPBlockHolder* block, bool eos = false) {
         return Status::InternalError("Send BroadcastPBlockHolder is not allowed!");
     }
 
@@ -307,11 +308,6 @@ public:
     }
 
     bool is_local() const { return _is_local; }
-
-    VDataStreamRecvr* local_recvr() {
-        DCHECK(_is_local && _local_recvr != nullptr);
-        return _local_recvr.get();
-    }
 
     virtual void ch_roll_pb_block();
 
@@ -416,10 +412,11 @@ protected:
         }                                                \
     } while (0)
 
-template <typename Channels>
+template <typename Channels, typename HashValueType>
 Status VDataStreamSender::channel_add_rows(RuntimeState* state, Channels& channels,
-                                           int num_channels, const uint64_t* __restrict channel_ids,
-                                           int rows, Block* block, bool eos) {
+                                           int num_channels,
+                                           const HashValueType* __restrict channel_ids, int rows,
+                                           Block* block, bool eos) {
     std::vector<int> channel2rows[num_channels];
 
     for (int i = 0; i < rows; i++) {
@@ -496,18 +493,17 @@ public:
         return Status::OK();
     }
 
-    Status send_broadcast_block(BroadcastPBlockHolder* block, [[maybe_unused]] bool* sent,
-                                bool eos = false) override {
+    Status send_broadcast_block(BroadcastPBlockHolder* block, bool eos = false) override {
         COUNTER_UPDATE(Channel<Parent>::_parent->blocks_sent_counter(), 1);
         if (eos) {
             if (_eos_send) {
+                block->unref();
                 return Status::OK();
-            } else {
-                _eos_send = true;
             }
+            _eos_send = true;
         }
         if (eos || block->get_block()->column_metas_size()) {
-            RETURN_IF_ERROR(_buffer->add_block({this, block, eos}, sent));
+            RETURN_IF_ERROR(_buffer->add_block({this, block, eos}));
         }
         return Status::OK();
     }
@@ -555,8 +551,12 @@ public:
         return _closure.get();
     }
 
-    void set_dependency(std::shared_ptr<pipeline::ChannelDependency> dependency) {
-        Channel<Parent>::_local_recvr->set_dependency(dependency);
+    std::shared_ptr<pipeline::LocalExchangeChannelDependency> get_local_channel_dependency() {
+        if (!Channel<Parent>::_local_recvr) {
+            throw Exception(ErrorCode::INTERNAL_ERROR, "_local_recvr is null");
+        }
+        return Channel<Parent>::_local_recvr->get_local_channel_dependency(
+                Channel<Parent>::_parent->sender_id());
     }
 
 private:

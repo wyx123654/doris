@@ -93,6 +93,13 @@
                                 "data-operate/import/import-way/insert-into-manual",
                                 "data-operate/import/import-way/load-json-format"
                             ]
+                        },
+                        {
+                            "type": "category",
+                            "label": "Import Advanced",
+                            "items": [
+                                "data-operate/import/import-advanced/min-load-replica-num"
+                            ]
                         }
                     ]
                 },
@@ -111,6 +118,7 @@
                     "items": [
                         "data-operate/update-delete/batch-delete-manual",
                         "data-operate/update-delete/update",
+                        "data-operate/update-delete/partial-update",
                         "data-operate/update-delete/delete-manual",
                         "data-operate/update-delete/sequence-column-manual"
                     ]
@@ -559,7 +567,8 @@
                                 "sql-manual/sql-functions/aggregate-functions/grouping",
                                 "sql-manual/sql-functions/aggregate-functions/grouping-id",
                                 "sql-manual/sql-functions/aggregate-functions/count-by-enum",
-                                "sql-manual/sql-functions/aggregate-functions/histogram"
+                                "sql-manual/sql-functions/aggregate-functions/histogram",
+                                "sql-manual/sql-functions/aggregate-functions/map-agg"
                             ]
                         },
                         {
@@ -599,7 +608,8 @@
                                 "sql-manual/sql-functions/bitmap-functions/orthogonal-bitmap-intersect-count",
                                 "sql-manual/sql-functions/bitmap-functions/orthogonal-bitmap-expr-calculate",
                                 "sql-manual/sql-functions/bitmap-functions/orthogonal-bitmap-expr-calculate-count",
-                                "sql-manual/sql-functions/bitmap-functions/bitmap-hash64"
+                                "sql-manual/sql-functions/bitmap-functions/bitmap-hash64",
+                                "sql-manual/sql-functions/bitmap-functions/bitmap-remove"
                             ]
                         },
                         {
@@ -739,7 +749,8 @@
                                 "sql-manual/sql-functions/table-functions/frontends",
                                 "sql-manual/sql-functions/table-functions/workload-group",
                                 "sql-manual/sql-functions/table-functions/catalogs",
-                                "sql-manual/sql-functions/table-functions/frontends_disks"
+                                "sql-manual/sql-functions/table-functions/frontends_disks",
+                                "sql-manual/sql-functions/table-functions/queries"
                             ]
                         },
                         {
@@ -1140,7 +1151,6 @@
                 },
                 "admin-manual/sql-interception",
                 "admin-manual/query-profile",
-                "admin-manual/tracing",
                 "admin-manual/certificate",
                 "admin-manual/fe-certificate",
                 {
@@ -1312,6 +1322,7 @@
             "type": "category",
             "label": "Release notes",
             "items": [
+                "releasenotes/release-2.0.2",
                 "releasenotes/release-2.0.1",
                 "releasenotes/release-2.0.0",
                 "releasenotes/release-1.2.7",

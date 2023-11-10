@@ -63,7 +63,7 @@ public class Profile {
     }
 
     public synchronized void update(long startTime, Map<String, String> summaryInfo, boolean isFinished,
-            int profileLevel, Planner planner) {
+            int profileLevel, Planner planner, boolean isPipelineX) {
         if (this.isFinished) {
             return;
         }
@@ -72,8 +72,9 @@ public class Profile {
             executionProfile.update(startTime, isFinished);
         }
         rootProfile.computeTimeInProfile();
-        rootProfile.setPlaner(planner);
+        rootProfile.setFragmentPlanInfo(planner);
         rootProfile.setProfileLevel(profileLevel);
+        rootProfile.setIsPipelineX(isPipelineX);
         ProfileManager.getInstance().pushProfile(rootProfile);
         this.isFinished = isFinished;
     }

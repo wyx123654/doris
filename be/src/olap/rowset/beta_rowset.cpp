@@ -46,7 +46,7 @@
 namespace doris {
 using namespace ErrorCode;
 
-std::string BetaRowset::segment_file_path(int segment_id) {
+std::string BetaRowset::segment_file_path(int segment_id) const {
     return segment_file_path(_rowset_dir, rowset_id(), segment_id);
 }
 
@@ -221,7 +221,7 @@ Status BetaRowset::link_files_to(const std::string& dir, RowsetId new_rowset_id,
         //     use copy? or keep refcount to avoid being delete?
         if (!local_fs->link_file(src_path, dst_path).ok()) {
             return Status::Error<OS_ERROR>("fail to create hard link. from={}, to={}, errno={}",
-                                           src_path, dst_path);
+                                           src_path, dst_path, Errno::no());
         }
         for (auto& index : _schema->indexes()) {
             if (index.index_type() != IndexType::INVERTED) {

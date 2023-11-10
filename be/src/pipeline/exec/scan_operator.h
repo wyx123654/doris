@@ -56,7 +56,7 @@ public:
     Status try_close(RuntimeState* state) override;
 };
 
-struct OpenDependency : public Dependency {
+struct OpenDependency final : public Dependency {
 public:
     ENABLE_FACTORY_CREATOR(OpenDependency);
     OpenDependency(int id) : Dependency(id, "OpenDependency") {}
@@ -65,14 +65,14 @@ public:
     [[nodiscard]] int64_t read_watcher_elapse_time() override { return 0; }
 };
 
-struct EosDependency : public Dependency {
+class EosDependency final : public Dependency {
 public:
     ENABLE_FACTORY_CREATOR(EosDependency);
     EosDependency(int id) : Dependency(id, "EosDependency") {}
     void* shared_state() override { return nullptr; }
 };
 
-struct ScannerDoneDependency : public Dependency {
+class ScannerDoneDependency final : public Dependency {
 public:
     ENABLE_FACTORY_CREATOR(ScannerDoneDependency);
     ScannerDoneDependency(int id, vectorized::ScannerContext* scanner_ctx)
@@ -90,7 +90,7 @@ private:
     vectorized::ScannerContext* _scanner_ctx;
 };
 
-struct DataReadyDependency : public Dependency {
+class DataReadyDependency final : public Dependency {
 public:
     ENABLE_FACTORY_CREATOR(DataReadyDependency);
     DataReadyDependency(int id, vectorized::ScannerContext* scanner_ctx)
@@ -103,7 +103,7 @@ public:
             _scanner_ctx->reschedule_scanner_ctx();
         }
         if (config::enable_fuzzy_mode && !_ready_for_read &&
-            _read_dependency_watcher.elapsed_time() > SLOW_DEPENDENCY_THRESHOLD) {
+            _should_log(_read_dependency_watcher.elapsed_time())) {
             LOG(WARNING) << "========Dependency may be blocked by some reasons: " << name() << " "
                          << id();
         }
@@ -118,7 +118,7 @@ class ScanLocalStateBase : public PipelineXLocalState<>, public vectorized::Runt
 public:
     ScanLocalStateBase(RuntimeState* state, OperatorXBase* parent)
             : PipelineXLocalState<>(state, parent),
-              vectorized::RuntimeFilterConsumer(parent->id(), parent->runtime_filter_descs(),
+              vectorized::RuntimeFilterConsumer(parent->node_id(), parent->runtime_filter_descs(),
                                                 parent->row_descriptor(), _conjuncts) {}
     virtual ~ScanLocalStateBase() = default;
 
@@ -136,7 +136,8 @@ public:
     [[nodiscard]] virtual int runtime_filter_num() const = 0;
 
     virtual Status clone_conjunct_ctxs(vectorized::VExprContextSPtrs& conjuncts) = 0;
-    virtual void set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) = 0;
+    virtual void set_scan_ranges(RuntimeState* state,
+                                 const std::vector<TScanRangeParams>& scan_ranges) = 0;
 
     virtual TPushAggOp::type get_push_down_agg_type() = 0;
 
@@ -219,11 +220,14 @@ class ScanLocalState : public ScanLocalStateBase {
     }
 
     Status clone_conjunct_ctxs(vectorized::VExprContextSPtrs& conjuncts) override;
-    virtual void set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) override {}
+    virtual void set_scan_ranges(RuntimeState* state,
+                                 const std::vector<TScanRangeParams>& scan_ranges) override {}
 
     TPushAggOp::type get_push_down_agg_type() override;
 
     int64_t get_push_down_count() override;
+
+    Dependency* dependency() override { return _source_dependency.get(); }
 
 protected:
     template <typename LocalStateType>
@@ -238,7 +242,7 @@ protected:
     }
     virtual bool _should_push_down_common_expr() { return false; }
 
-    virtual bool _storage_no_merge() { return true; }
+    virtual bool _storage_no_merge() { return false; }
     virtual bool _is_key_column(const std::string& col_name) { return false; }
     virtual vectorized::VScanNode::PushDownType _should_push_down_bloom_filter() {
         return vectorized::VScanNode::PushDownType::UNACCEPTABLE;
@@ -282,9 +286,6 @@ protected:
                                 vectorized::VExprSPtr& output_expr);
     Status _eval_const_conjuncts(vectorized::VExpr* vexpr, vectorized::VExprContext* expr_ctx,
                                  vectorized::VScanNode::PushDownType* pdt);
-
-    Status _normalize_bloom_filter(vectorized::VExpr* expr, vectorized::VExprContext* expr_ctx,
-                                   SlotDescriptor* slot, vectorized::VScanNode::PushDownType* pdt);
 
     Status _normalize_bitmap_filter(vectorized::VExpr* expr, vectorized::VExprContext* expr_ctx,
                                     SlotDescriptor* slot, vectorized::VScanNode::PushDownType* pdt);
@@ -412,19 +413,14 @@ protected:
 template <typename LocalStateType>
 class ScanOperatorX : public OperatorX<LocalStateType> {
 public:
-    bool runtime_filters_are_ready_or_timeout(RuntimeState* state) const override;
-
     Status try_close(RuntimeState* state) override;
-
-    Dependency* wait_for_dependency(RuntimeState* state) override;
-    bool is_pending_finish(RuntimeState* state) const override;
 
     Status init(const TPlanNode& tnode, RuntimeState* state) override;
     Status prepare(RuntimeState* state) override { return OperatorXBase::prepare(state); }
     Status open(RuntimeState* state) override;
     Status get_block(RuntimeState* state, vectorized::Block* block,
                      SourceState& source_state) override;
-    bool is_source() const override { return true; }
+    [[nodiscard]] bool is_source() const override { return true; }
 
     const std::vector<TRuntimeFilterDesc>& runtime_filter_descs() override {
         return _runtime_filter_descs;
@@ -434,10 +430,13 @@ public:
 
     int64_t get_push_down_count() const { return _push_down_count; }
     using OperatorX<LocalStateType>::id;
+    using OperatorX<LocalStateType>::operator_id;
+    using OperatorX<LocalStateType>::get_local_state;
 
 protected:
     using LocalState = LocalStateType;
-    ScanOperatorX(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
+    ScanOperatorX(ObjectPool* pool, const TPlanNode& tnode, int operator_id,
+                  const DescriptorTbl& descs);
     virtual ~ScanOperatorX() = default;
     template <typename Derived>
     friend class ScanLocalState;
