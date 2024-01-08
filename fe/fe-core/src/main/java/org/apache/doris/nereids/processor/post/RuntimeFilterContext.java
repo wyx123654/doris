@@ -28,7 +28,6 @@ import org.apache.doris.nereids.trees.expressions.NamedExpression;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
 import org.apache.doris.nereids.trees.plans.Plan;
-import org.apache.doris.nereids.trees.plans.RelationId;
 import org.apache.doris.nereids.trees.plans.physical.AbstractPhysicalJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalCTEProducer;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
@@ -53,6 +52,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * runtime filter context used at post process and translation.
@@ -107,7 +107,7 @@ public class RuntimeFilterContext {
     private final Map<Plan, List<ExprId>> joinToTargetExprId = Maps.newHashMap();
 
     // olap scan node that contains target of a runtime filter.
-    private final Map<RelationId, List<Slot>> targetOnOlapScanNodeMap = Maps.newHashMap();
+    private final Map<PhysicalRelation, List<Slot>> targetOnOlapScanNodeMap = Maps.newHashMap();
 
     private final List<org.apache.doris.planner.RuntimeFilter> legacyFilters = Lists.newArrayList();
 
@@ -121,17 +121,17 @@ public class RuntimeFilterContext {
     // you can see disjoint set data structure to learn the processing detailed.
     private final Map<NamedExpression, Pair<PhysicalRelation, Slot>> aliasTransferMap = Maps.newHashMap();
 
-    private final Map<Slot, ScanNode> scanNodeOfLegacyRuntimeFilterTarget = Maps.newHashMap();
+    private final Map<Slot, ScanNode> scanNodeOfLegacyRuntimeFilterTarget = Maps.newLinkedHashMap();
 
     private final Set<Plan> effectiveSrcNodes = Sets.newHashSet();
 
     // cte to related joins map which can extract common runtime filter to cte inside
-    private final Map<CTEId, Set<PhysicalHashJoin>> cteToJoinsMap = Maps.newHashMap();
+    private final Map<CTEId, Set<PhysicalHashJoin>> cteToJoinsMap = Maps.newLinkedHashMap();
 
     // cte candidates which can be pushed into common runtime filter into from outside
-    private final Map<PhysicalCTEProducer, Map<EqualTo, PhysicalHashJoin>> cteRFPushDownMap = Maps.newHashMap();
+    private final Map<PhysicalCTEProducer, Map<EqualTo, PhysicalHashJoin>> cteRFPushDownMap = Maps.newLinkedHashMap();
 
-    private final Map<CTEId, PhysicalCTEProducer> cteProducerMap = Maps.newHashMap();
+    private final Map<CTEId, PhysicalCTEProducer> cteProducerMap = Maps.newLinkedHashMap();
 
     // cte whose runtime filter has been extracted
     private final Set<CTEId> processedCTE = Sets.newHashSet();
@@ -197,6 +197,14 @@ public class RuntimeFilterContext {
                 RuntimeFilter rf = iter.next();
                 if (rf.getBuilderNode().equals(builderNode)) {
                     builderNode.getRuntimeFilters().remove(rf);
+                    for (Slot target : rf.getTargetSlots()) {
+                        if (target.getExprId().equals(targetId)) {
+                            Pair<PhysicalRelation, Slot> pair = aliasTransferMap.get(target);
+                            if (pair != null) {
+                                pair.first.removeAppliedRuntimeFilter(rf);
+                            }
+                        }
+                    }
                     iter.remove();
                     prunedRF.add(rf);
                 }
@@ -204,8 +212,8 @@ public class RuntimeFilterContext {
         }
     }
 
-    public void setTargetsOnScanNode(RelationId id, Slot slot) {
-        this.targetOnOlapScanNodeMap.computeIfAbsent(id, k -> Lists.newArrayList()).add(slot);
+    public void setTargetsOnScanNode(PhysicalRelation relation, Slot slot) {
+        this.targetOnOlapScanNodeMap.computeIfAbsent(relation, k -> Lists.newArrayList()).add(slot);
     }
 
     public RuntimeFilter getRuntimeFilterBySrcAndType(Expression src,
@@ -230,6 +238,22 @@ public class RuntimeFilterContext {
         return aliasTransferMap;
     }
 
+    public Pair<PhysicalRelation, Slot> aliasTransferMapRemove(NamedExpression slot) {
+        return aliasTransferMap.remove(slot);
+    }
+
+    public Pair<PhysicalRelation, Slot> getAliasTransferPair(NamedExpression slot) {
+        return aliasTransferMap.get(slot);
+    }
+
+    public Pair<PhysicalRelation, Slot> aliasTransferMapPut(NamedExpression slot, Pair<PhysicalRelation, Slot> pair) {
+        return aliasTransferMap.put(slot, pair);
+    }
+
+    public boolean aliasTransferMapContains(NamedExpression slot) {
+        return aliasTransferMap.containsKey(slot);
+    }
+
     public Map<Slot, ScanNode> getScanNodeOfLegacyRuntimeFilterTarget() {
         return scanNodeOfLegacyRuntimeFilterTarget;
     }
@@ -247,8 +271,8 @@ public class RuntimeFilterContext {
         return targetExprIdToFilter;
     }
 
-    public Map<RelationId, List<Slot>> getTargetOnOlapScanNodeMap() {
-        return targetOnOlapScanNodeMap;
+    public List<Slot> getTargetListByScan(PhysicalRelation scan) {
+        return targetOnOlapScanNodeMap.getOrDefault(scan, Collections.emptyList());
     }
 
     public List<org.apache.doris.planner.RuntimeFilter> getLegacyFilters() {
@@ -266,6 +290,7 @@ public class RuntimeFilterContext {
                     l.addAll(r);
                     return l;
                 });
+        filters = filters.stream().distinct().collect(Collectors.toList());
         filters.sort((a, b) -> a.getId().compareTo(b.getId()));
         return filters;
     }

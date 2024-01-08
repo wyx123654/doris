@@ -1363,18 +1363,18 @@ public class SingleNodePlanner {
                 if (olapScanNode.getSelectedPartitionIds().size() == 0 && !FeConstants.runningUnitTest) {
                     continue;
                 }
+                boolean tupleSelectFailed = false;
 
                 try {
                     // select index by the old Rollup selector
                     olapScanNode.selectBestRollupByRollupSelector(analyzer);
                 } catch (UserException e) {
-                    LOG.debug("May no rollup index matched");
+                    tupleSelectFailed = true;
                 }
 
                 // select index by the new Materialized selector
                 MaterializedViewSelector.BestIndexInfo bestIndexInfo = materializedViewSelector
                         .selectBestMV(olapScanNode);
-                boolean tupleSelectFailed = false;
                 if (bestIndexInfo == null) {
                     tupleSelectFailed = true;
                 } else {
@@ -1926,7 +1926,7 @@ public class SingleNodePlanner {
                         ((HiveScanNode) scanNode).setTableSample(tblRef.getTableSample());
                         break;
                     default:
-                        throw new UserException("Not supported table type: " + ((HMSExternalTable) table).getDlaType());
+                        throw new UserException("Not supported table type" + table.getType());
                 }
                 break;
             case ICEBERG_EXTERNAL_TABLE:
@@ -1950,7 +1950,7 @@ public class SingleNodePlanner {
                 scanNode = new TestExternalTableScanNode(ctx.getNextNodeId(), tblRef.getDesc());
                 break;
             default:
-                throw new UserException("Not supported table type: " + tblRef.getTable().getType());
+                throw new UserException("Not supported table type" + tblRef.getTable().getType());
         }
         if (scanNode instanceof OlapScanNode || scanNode instanceof EsScanNode
                 || scanNode instanceof OdbcScanNode || scanNode instanceof JdbcScanNode

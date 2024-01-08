@@ -196,6 +196,10 @@ class UpCommand(Command):
                            help="Recreate containers even if their configuration" \
                                 "and image haven't changed. ")
 
+        parser.add_argument("--coverage-dir",
+                            default="",
+                            help="code coverage output directory")
+
     def run(self, args):
         if not args.NAME:
             raise Exception("Need specific not empty cluster name")
@@ -218,7 +222,7 @@ class UpCommand(Command):
                     utils.render_yellow("Ignore --be-id for new cluster"))
             cluster = CLUSTER.Cluster.new(args.NAME, args.IMAGE,
                                           args.fe_config, args.be_config,
-                                          args.be_disks)
+                                          args.be_disks, args.coverage_dir)
             LOG.info("Create new cluster {} succ, cluster path is {}".format(
                 args.NAME, cluster.get_path()))
             if not args.add_fe_num:
@@ -264,6 +268,12 @@ class UpCommand(Command):
 
         utils.exec_docker_compose_command(cluster.get_compose_file(), "up",
                                           options, related_nodes)
+
+        LOG.info(
+            "Master fe query address: " +
+            utils.render_green(CLUSTER.get_master_fe_endpoint(cluster.name)) +
+            "\n")
+
         if not args.start:
             LOG.info(
                 utils.render_green(
@@ -301,7 +311,6 @@ class UpCommand(Command):
                     "Up cluster {} succ, related node num {}".format(
                         args.NAME, related_node_num)))
 
-        db_mgr = database.get_db_mgr(args.NAME, False)
         return {
             "fe": {
                 "add_list": add_fe_ids,
@@ -347,9 +356,17 @@ class DownCommand(Command):
             cluster, args.fe_id, args.be_id, ignore_not_exists=True)
 
         if for_all:
-            utils.exec_docker_compose_command(cluster.get_compose_file(),
-                                              "down",
-                                              ["-v", "--remove-orphans"])
+            if os.path.exists(cluster.get_compose_file()):
+                try:
+                    utils.exec_docker_compose_command(
+                        cluster.get_compose_file(), "down",
+                        ["-v", "--remove-orphans"])
+                except Exception as e:
+                    LOG.warn("down cluster has exception: " + str(e))
+            try:
+                utils.remove_docker_network(cluster.name)
+            except Exception as e:
+                LOG.warn("remove network has exception: " + str(e))
             if args.clean:
                 utils.enable_dir_with_rw_perm(cluster.get_path())
                 shutil.rmtree(cluster.get_path())
@@ -478,12 +495,6 @@ class ListCommand(Command):
             "Specify multiple clusters, if specific, show all their containers."
         )
         self._add_parser_output_json(parser)
-        parser.add_argument(
-            "-a",
-            "--all",
-            default=False,
-            action=self._get_parser_bool_action(True),
-            help="Show all clusters, include stopped or bad clusters.")
         parser.add_argument("--detail",
                             default=False,
                             action=self._get_parser_bool_action(True),
@@ -541,8 +552,8 @@ class ListCommand(Command):
         search_names = []
         if args.NAME:
             search_names = args.NAME
-        elif os.path.exists(CLUSTER.LOCAL_DORIS_PATH):
-            search_names = os.listdir(CLUSTER.LOCAL_DORIS_PATH)
+        else:
+            search_names = CLUSTER.get_all_cluster_names()
 
         for cluster_name in search_names:
             status, services = parse_cluster_compose_file(cluster_name)
@@ -563,7 +574,8 @@ class ListCommand(Command):
 
         TYPE_COMPOSESERVICE = type(ComposeService("", "", ""))
         if not args.NAME:
-            header = ("CLUSTER", "OWNER", "STATUS", "CONFIG FILES")
+            header = ("CLUSTER", "OWNER", "STATUS", "MASTER FE",
+                      "CONFIG FILES")
             rows = []
             for name in sorted(clusters.keys()):
                 cluster_info = clusters[name]
@@ -577,11 +589,10 @@ class ListCommand(Command):
                     "{}({})".format(status, count)
                     for status, count in service_statuses.items()
                 ])
-                if not args.all and service_statuses.get("running", 0) == 0:
-                    continue
                 owner = utils.get_path_owner(CLUSTER.get_cluster_path(name))
                 compose_file = CLUSTER.get_compose_file(name)
                 rows.append((name, owner, show_status,
+                             CLUSTER.get_master_fe_endpoint(name),
                              "{}{}".format(compose_file,
                                            cluster_info["status"])))
             return self._handle_data(header, rows)

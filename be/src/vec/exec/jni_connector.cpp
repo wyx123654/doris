@@ -44,25 +44,25 @@ class RuntimeProfile;
 
 namespace doris::vectorized {
 
-#define FOR_FIXED_LENGTH_TYPES(M)                                     \
-    M(TypeIndex::Int8, ColumnVector<Int8>, Int8)                      \
-    M(TypeIndex::UInt8, ColumnVector<UInt8>, UInt8)                   \
-    M(TypeIndex::Int16, ColumnVector<Int16>, Int16)                   \
-    M(TypeIndex::UInt16, ColumnVector<UInt16>, UInt16)                \
-    M(TypeIndex::Int32, ColumnVector<Int32>, Int32)                   \
-    M(TypeIndex::UInt32, ColumnVector<UInt32>, UInt32)                \
-    M(TypeIndex::Int64, ColumnVector<Int64>, Int64)                   \
-    M(TypeIndex::UInt64, ColumnVector<UInt64>, UInt64)                \
-    M(TypeIndex::Int128, ColumnVector<Int128>, Int128)                \
-    M(TypeIndex::Float32, ColumnVector<Float32>, Float32)             \
-    M(TypeIndex::Float64, ColumnVector<Float64>, Float64)             \
-    M(TypeIndex::Decimal128, ColumnDecimal<Decimal<Int128>>, Int128)  \
-    M(TypeIndex::Decimal128I, ColumnDecimal<Decimal<Int128>>, Int128) \
-    M(TypeIndex::Decimal32, ColumnDecimal<Decimal<Int32>>, Int32)     \
-    M(TypeIndex::Decimal64, ColumnDecimal<Decimal<Int64>>, Int64)     \
-    M(TypeIndex::Date, ColumnVector<Int64>, Int64)                    \
-    M(TypeIndex::DateV2, ColumnVector<UInt32>, UInt32)                \
-    M(TypeIndex::DateTime, ColumnVector<Int64>, Int64)                \
+#define FOR_FIXED_LENGTH_TYPES(M)                                      \
+    M(TypeIndex::Int8, ColumnVector<Int8>, Int8)                       \
+    M(TypeIndex::UInt8, ColumnVector<UInt8>, UInt8)                    \
+    M(TypeIndex::Int16, ColumnVector<Int16>, Int16)                    \
+    M(TypeIndex::UInt16, ColumnVector<UInt16>, UInt16)                 \
+    M(TypeIndex::Int32, ColumnVector<Int32>, Int32)                    \
+    M(TypeIndex::UInt32, ColumnVector<UInt32>, UInt32)                 \
+    M(TypeIndex::Int64, ColumnVector<Int64>, Int64)                    \
+    M(TypeIndex::UInt64, ColumnVector<UInt64>, UInt64)                 \
+    M(TypeIndex::Int128, ColumnVector<Int128>, Int128)                 \
+    M(TypeIndex::Float32, ColumnVector<Float32>, Float32)              \
+    M(TypeIndex::Float64, ColumnVector<Float64>, Float64)              \
+    M(TypeIndex::Decimal128V2, ColumnDecimal<Decimal<Int128>>, Int128) \
+    M(TypeIndex::Decimal128V3, ColumnDecimal<Decimal<Int128>>, Int128) \
+    M(TypeIndex::Decimal32, ColumnDecimal<Decimal<Int32>>, Int32)      \
+    M(TypeIndex::Decimal64, ColumnDecimal<Decimal<Int64>>, Int64)      \
+    M(TypeIndex::Date, ColumnVector<Int64>, Int64)                     \
+    M(TypeIndex::DateV2, ColumnVector<UInt32>, UInt32)                 \
+    M(TypeIndex::DateTime, ColumnVector<Int64>, Int64)                 \
     M(TypeIndex::DateTimeV2, ColumnVector<UInt64>, UInt64)
 
 JniConnector::~JniConnector() {
@@ -95,6 +95,7 @@ Status JniConnector::open(RuntimeState* state, RuntimeProfile* profile) {
     RETURN_IF_ERROR(_init_jni_scanner(env, batch_size));
     // Call org.apache.doris.common.jni.JniScanner#open
     env->CallVoidMethod(_jni_scanner_obj, _jni_scanner_open);
+    _scanner_opened = true;
     RETURN_ERROR_IF_EXC(env);
     return Status::OK();
 }
@@ -167,7 +168,7 @@ Status JniConnector::close() {
     if (!_closed) {
         JNIEnv* env = nullptr;
         RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-        if (_scanner_initialized) {
+        if (_scanner_opened) {
             // update scanner metrics
             for (const auto& metric : get_statistics(env)) {
                 std::vector<std::string> type_and_name = split(metric.first, ":");
@@ -204,8 +205,8 @@ Status JniConnector::close() {
         _closed = true;
         jthrowable exc = (env)->ExceptionOccurred();
         if (exc != nullptr) {
-            LOG(FATAL) << "Failed to release jni resource: "
-                       << JniUtil::GetJniExceptionMsg(env).to_string();
+            LOG(WARNING) << "Failed to release jni resource: "
+                         << JniUtil::GetJniExceptionMsg(env).to_string();
         }
     }
     return Status::OK();
@@ -241,7 +242,6 @@ Status JniConnector::_init_jni_scanner(JNIEnv* env, int batch_size) {
     _jni_scanner_get_statistics =
             env->GetMethodID(_jni_scanner_cls, "getStatistics", "()Ljava/util/Map;");
     RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, jni_scanner_obj, &_jni_scanner_obj));
-    _scanner_initialized = true;
     env->DeleteLocalRef(jni_scanner_obj);
     RETURN_ERROR_IF_EXC(env);
     return Status::OK();
@@ -480,9 +480,10 @@ std::string JniConnector::get_jni_type(const DataTypePtr& data_type) {
         return "datetimev1";
     case TYPE_DATETIMEV2:
         [[fallthrough]];
-    case TYPE_TIMEV2:
-        // can ignore precision of timestamp in jni
-        return "datetimev2";
+    case TYPE_TIMEV2: {
+        buffer << "datetimev2(" << type->get_scale() << ")";
+        return buffer.str();
+    }
     case TYPE_BINARY:
         return "binary";
     case TYPE_DECIMALV2: {
@@ -563,9 +564,10 @@ std::string JniConnector::get_jni_type(const TypeDescriptor& desc) {
         return "datetimev1";
     case TYPE_DATETIMEV2:
         [[fallthrough]];
-    case TYPE_TIMEV2:
-        // can ignore precision of timestamp in jni
-        return "datetimev2";
+    case TYPE_TIMEV2: {
+        buffer << "datetimev2(" << desc.scale << ")";
+        return buffer.str();
+    }
     case TYPE_BINARY:
         return "binary";
     case TYPE_CHAR: {

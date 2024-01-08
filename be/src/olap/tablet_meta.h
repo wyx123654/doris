@@ -46,6 +46,7 @@
 #include "olap/olap_common.h"
 #include "olap/rowset/rowset_meta.h"
 #include "olap/tablet_schema.h"
+#include "runtime/memory/lru_cache_policy.h"
 #include "util/uid_util.h"
 
 namespace json2pb {
@@ -91,10 +92,10 @@ class TBinlogConfig;
 // The concurrency control is handled in Tablet Class, not in this class.
 class TabletMeta {
 public:
-    static Status create(const TCreateTabletReq& request, const TabletUid& tablet_uid,
-                         uint64_t shard_id, uint32_t next_unique_id,
-                         const std::unordered_map<uint32_t, uint32_t>& col_ordinal_to_unique_id,
-                         TabletMetaSharedPtr* tablet_meta);
+    static TabletMetaSharedPtr create(
+            const TCreateTabletReq& request, const TabletUid& tablet_uid, uint64_t shard_id,
+            uint32_t next_unique_id,
+            const std::unordered_map<uint32_t, uint32_t>& col_ordinal_to_unique_id);
 
     TabletMeta();
     TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id, int64_t replica_id,
@@ -108,7 +109,8 @@ public:
                std::string compaction_policy = "size_based",
                int64_t time_series_compaction_goal_size_mbytes = 1024,
                int64_t time_series_compaction_file_count_threshold = 2000,
-               int64_t time_series_compaction_time_threshold_seconds = 3600);
+               int64_t time_series_compaction_time_threshold_seconds = 3600,
+               int64_t time_series_compaction_empty_rowsets_threshold = 5);
     // If need add a filed in TableMeta, filed init copy in copy construct function
     TabletMeta(const TabletMeta& tablet_meta);
     TabletMeta(TabletMeta&& tablet_meta) = delete;
@@ -131,7 +133,11 @@ public:
 
     void to_meta_pb(TabletMetaPB* tablet_meta_pb);
     void to_json(std::string* json_string, json2pb::Pb2JsonOptions& options);
-    uint32_t mem_size() const;
+    // Don't use.
+    // TODO: memory size of TabletSchema cannot be accurately tracked.
+    // In some places, temporarily use num_columns() as TabletSchema size.
+    int64_t mem_size() const;
+    size_t tablet_columns_num() const { return _schema->num_columns(); }
 
     TabletTypePB tablet_type() const { return _tablet_type; }
     TabletUid tablet_uid() const;
@@ -246,6 +252,12 @@ public:
     int64_t time_series_compaction_time_threshold_seconds() const {
         return _time_series_compaction_time_threshold_seconds;
     }
+    void set_time_series_compaction_empty_rowsets_threshold(int64_t empty_rowsets_threshold) {
+        _time_series_compaction_empty_rowsets_threshold = empty_rowsets_threshold;
+    }
+    int64_t time_series_compaction_empty_rowsets_threshold() const {
+        return _time_series_compaction_empty_rowsets_threshold;
+    }
 
 private:
     Status _save_meta(DataDir* data_dir);
@@ -298,6 +310,7 @@ private:
     int64_t _time_series_compaction_goal_size_mbytes = 0;
     int64_t _time_series_compaction_file_count_threshold = 0;
     int64_t _time_series_compaction_time_threshold_seconds = 0;
+    int64_t _time_series_compaction_empty_rowsets_threshold = 0;
 
     mutable std::shared_mutex _meta_lock;
 };
@@ -336,7 +349,6 @@ public:
     // tablet's delete bitmap we can use arbitary version number in BitmapKey. Here we define some version numbers
     // for specific usage during this periods to avoid conflicts
     constexpr static inline uint64_t TEMP_VERSION_COMMON = 0;
-    constexpr static inline uint64_t TEMP_VERSION_FOR_DELETE_SIGN = 1;
 
     /**
      * 
@@ -466,6 +478,14 @@ public:
      */
     std::shared_ptr<roaring::Roaring> get_agg(const BitmapKey& bmk) const;
 
+    class AggCachePolicy : public LRUCachePolicy {
+    public:
+        AggCachePolicy(size_t capacity)
+                : LRUCachePolicy(CachePolicy::CacheType::DELETE_BITMAP_AGG_CACHE, capacity,
+                                 LRUCacheType::SIZE,
+                                 config::delete_bitmap_agg_cache_stale_sweep_time_sec, 256) {}
+    };
+
     class AggCache {
     public:
         struct Value {
@@ -475,8 +495,7 @@ public:
         AggCache(size_t size_in_bytes) {
             static std::once_flag once;
             std::call_once(once, [size_in_bytes] {
-                auto tmp = new ShardedLRUCache("DeleteBitmap AggCache", size_in_bytes,
-                                               LRUCacheType::SIZE, 256);
+                auto* tmp = new AggCachePolicy(size_in_bytes);
                 AggCache::s_repr.store(tmp, std::memory_order_release);
             });
 
@@ -484,8 +503,8 @@ public:
             }
         }
 
-        static ShardedLRUCache* repr() { return s_repr.load(std::memory_order_acquire); }
-        static std::atomic<ShardedLRUCache*> s_repr;
+        static Cache* repr() { return s_repr.load(std::memory_order_acquire)->cache(); }
+        static std::atomic<AggCachePolicy*> s_repr;
     };
 
 private:
@@ -632,6 +651,8 @@ inline bool TabletMeta::all_beta() const {
     }
     return true;
 }
+
+std::string tablet_state_name(TabletState state);
 
 // Only for unit test now.
 bool operator==(const TabletMeta& a, const TabletMeta& b);

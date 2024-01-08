@@ -59,7 +59,7 @@ github:
           - BE UT (Doris BE UT)
           - Build Broker
           - Build Documents
-          - ShellCheck
+          - ShellCheck          
           - clickbench-new (clickbench)
           - Build Third Party Libraries (Linux)
           - Build Third Party Libraries (macOS)
@@ -80,6 +80,31 @@ github:
         dismiss_stale_reviews: true
         required_approving_review_count: 1
 
+    branch-2.0:
+      required_status_checks:
+      # if strict is true, means "Require branches to be up to date before merging".
+        strict: false
+        contexts:
+          - License Check
+          - Clang Formatter
+          - CheckStyle
+          - P0 Regression (Doris Regression)
+          - P1 Regression (Doris Regression)
+          - External Regression (Doris External Regression)
+          - FE UT (Doris FE UT)
+          - BE UT (Doris BE UT)
+          - Build Broker
+          - ShellCheck
+          - Build Documents
+          - clickbench-new (clickbench)
+          - Build Third Party Libraries (Linux)
+          - Build Third Party Libraries (macOS)
+          - COMPILE (DORIS_COMPILE)
+
+        required_pull_request_reviews:
+          dismiss_stale_reviews: true
+          required_approving_review_count: 1
+
   collaborators:
     - LemonLiTree
     - Yukang-Lian
@@ -87,10 +112,11 @@ github:
     - platoneko
     - Lchangliang
     - freemandealer
-    - nanfeng1999
-    - gitccl
     - shuke987
     - wm1581066
+    - KassieZ
+    - yujun777
+    - gavinchou
 
 notifications:
     pullrequests_status:  commits@doris.apache.org

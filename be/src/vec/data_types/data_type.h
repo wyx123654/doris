@@ -78,7 +78,6 @@ public:
     virtual TypeIndex get_type_id() const = 0;
 
     virtual TypeDescriptor get_type_as_type_descriptor() const = 0;
-    virtual TPrimitiveType::type get_type_as_tprimitive_type() const = 0;
     virtual doris::FieldType get_storage_field_type() const = 0;
 
     virtual void to_string(const IColumn& column, size_t row_num, BufferWritable& ostr) const;
@@ -148,20 +147,6 @@ public:
       * The same for nullable of comparable types: they are comparable (but not totally-comparable).
       */
     virtual bool is_comparable() const { return false; }
-    /** Values of data type can be summed (possibly with overflow, within the same data type).
-      * Example: numbers, even nullable. Not Date/DateTime. Not Enum.
-      * Enums can be passed to aggregate function 'sum', but the result is Int64, not Enum, so they are not summable.
-      */
-    virtual bool is_summable() const { return false; }
-
-    /** Can be used in operations like bit and, bit shift, bit not, etc.
-      */
-    virtual bool can_be_used_in_bit_operations() const { return false; }
-
-    /** Can be used in boolean context (WHERE, HAVING).
-      * UInt8, maybe nullable.
-      */
-    virtual bool can_be_used_in_boolean_context() const { return false; }
 
     /** Numbers, Enums, Date, DateTime. Not nullable.
       */
@@ -281,11 +266,11 @@ struct WhichDataType {
 
     bool is_decimal32() const { return idx == TypeIndex::Decimal32; }
     bool is_decimal64() const { return idx == TypeIndex::Decimal64; }
-    bool is_decimal128() const { return idx == TypeIndex::Decimal128; }
-    bool is_decimal128i() const { return idx == TypeIndex::Decimal128I; }
+    bool is_decimal128v2() const { return idx == TypeIndex::Decimal128V2; }
+    bool is_decimal128v3() const { return idx == TypeIndex::Decimal128V3; }
     bool is_decimal256() const { return idx == TypeIndex::Decimal256; }
     bool is_decimal() const {
-        return is_decimal32() || is_decimal64() || is_decimal128() || is_decimal128i() ||
+        return is_decimal32() || is_decimal64() || is_decimal128v2() || is_decimal128v3() ||
                is_decimal256();
     }
 
@@ -341,7 +326,7 @@ inline bool is_decimal(const DataTypePtr& data_type) {
     return WhichDataType(data_type).is_decimal();
 }
 inline bool is_decimal_v2(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_decimal128();
+    return WhichDataType(data_type).is_decimal128v2();
 }
 inline bool is_tuple(const DataTypePtr& data_type) {
     return WhichDataType(data_type).is_tuple();

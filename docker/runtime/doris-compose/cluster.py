@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import filelock
 import json
 import jsonpickle
 import os
@@ -22,10 +23,8 @@ import os.path
 import utils
 
 DOCKER_DORIS_PATH = "/opt/apache-doris"
-LOCAL_DORIS_PATH = os.getenv("LOCAL_DORIS_PATH")
-if not LOCAL_DORIS_PATH:
-    LOCAL_DORIS_PATH = "/tmp/doris"
-
+LOCAL_DORIS_PATH = os.getenv("LOCAL_DORIS_PATH", "/tmp/doris")
+DORIS_SUBNET_START = int(os.getenv("DORIS_SUBNET_START", 128))
 LOCAL_RESOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "resource")
 DOCKER_RESOURCE_PATH = os.path.join(DOCKER_DORIS_PATH, "resource")
@@ -59,23 +58,45 @@ def get_status_path(cluster_name):
     return os.path.join(get_cluster_path(cluster_name), "status")
 
 
+def get_all_cluster_names():
+    if not os.path.exists(LOCAL_DORIS_PATH):
+        return []
+    else:
+        return [
+            subdir for subdir in os.listdir(LOCAL_DORIS_PATH)
+            if os.path.isdir(os.path.join(LOCAL_DORIS_PATH, subdir))
+        ]
+
+
 def gen_subnet_prefix16():
     used_subnet = utils.get_docker_subnets_prefix16()
-    if os.path.exists(LOCAL_DORIS_PATH):
-        for cluster_name in os.listdir(LOCAL_DORIS_PATH):
-            try:
-                cluster = Cluster.load(cluster_name)
-                used_subnet[cluster.subnet] = True
-            except:
-                pass
+    for cluster_name in get_all_cluster_names():
+        try:
+            cluster = Cluster.load(cluster_name)
+            used_subnet[cluster.subnet] = True
+        except:
+            pass
 
-    for i in range(128, 192):
+    for i in range(DORIS_SUBNET_START, 192):
         for j in range(256):
             subnet = "{}.{}".format(i, j)
             if not used_subnet.get(subnet, False):
                 return subnet
 
     raise Exception("Failed to gen subnet")
+
+
+def get_master_fe_endpoint(cluster_name):
+    master_fe_ip_file = get_cluster_path(cluster_name) + "/status/master_fe_ip"
+    if os.path.exists(master_fe_ip_file):
+        with open(master_fe_ip_file, "r") as f:
+            return "{}:{}".format(f.read().strip(), FE_QUERY_PORT)
+    try:
+        cluster = Cluster.load(cluster_name)
+        return "{}:{}".format(
+            cluster.get_node(Node.TYPE_FE, 1).get_ip(), FE_QUERY_PORT)
+    except:
+        return ""
 
 
 class NodeMeta(object):
@@ -132,18 +153,19 @@ class Node(object):
     TYPE_BE = "be"
     TYPE_ALL = [TYPE_FE, TYPE_BE]
 
-    def __init__(self, cluster_name, id, subnet, meta):
+    def __init__(self, cluster_name, coverage_dir, id, subnet, meta):
         self.cluster_name = cluster_name
+        self.coverage_dir = coverage_dir
         self.id = id
         self.subnet = subnet
         self.meta = meta
 
     @staticmethod
-    def new(cluster_name, node_type, id, subnet, meta):
+    def new(cluster_name, coverage_dir, node_type, id, subnet, meta):
         if node_type == Node.TYPE_FE:
-            return FE(cluster_name, id, subnet, meta)
+            return FE(cluster_name, coverage_dir, id, subnet, meta)
         elif node_type == Node.TYPE_BE:
-            return BE(cluster_name, id, subnet, meta)
+            return BE(cluster_name, coverage_dir, id, subnet, meta)
         else:
             raise Exception("Unknown node type {}".format(node_type))
 
@@ -226,67 +248,78 @@ class Node(object):
                                                       self.get_name()))
 
     def docker_env(self):
-        return {
+        enable_coverage = self.coverage_dir
+
+        envs = {
             "MY_IP": self.get_ip(),
             "MY_ID": self.id,
             "FE_QUERY_PORT": FE_QUERY_PORT,
             "FE_EDITLOG_PORT": FE_EDITLOG_PORT,
             "BE_HEARTBEAT_PORT": BE_HEARTBEAT_PORT,
             "DORIS_HOME": os.path.join(DOCKER_DORIS_PATH, self.node_type()),
+            "STOP_GRACE": 1 if enable_coverage else 0,
         }
+
+        if enable_coverage:
+            outfile = "{}/coverage/{}-coverage-{}-{}".format(
+                DOCKER_DORIS_PATH, self.node_type(), self.cluster_name,
+                self.id)
+            if self.node_type() == Node.TYPE_FE:
+                envs["JACOCO_COVERAGE_OPT"] = "-javaagent:/jacoco/lib/jacocoagent.jar" \
+                    "=excludes=org.apache.doris.thrift:org.apache.doris.proto:org.apache.parquet.format" \
+                    ":com.aliyun*:com.amazonaws*:org.apache.hadoop.hive.metastore:org.apache.parquet.format," \
+                    "output=file,append=true,destfile=" + outfile
+            elif self.node_type() == Node.TYPE_BE:
+                envs["LLVM_PROFILE_FILE_PREFIX"] = outfile
+
+        return envs
 
     def docker_ports(self):
         raise Exception("No implemented")
 
     def compose(self):
+        volumes = [
+            "{}:{}/{}/{}".format(os.path.join(self.get_path(), sub_dir),
+                                 DOCKER_DORIS_PATH, self.node_type(), sub_dir)
+            for sub_dir in self.expose_sub_dirs()
+        ] + [
+            "{}:{}:ro".format(LOCAL_RESOURCE_PATH, DOCKER_RESOURCE_PATH),
+            "{}:{}/{}/status".format(get_status_path(self.cluster_name),
+                                     DOCKER_DORIS_PATH, self.node_type()),
+        ] + [
+            "{0}:{0}:ro".format(path)
+            for path in ("/etc/localtime", "/etc/timezone",
+                         "/usr/share/zoneinfo") if os.path.exists(path)
+        ]
+        if self.coverage_dir:
+            volumes.append("{}:{}/coverage".format(self.coverage_dir,
+                                                   DOCKER_DORIS_PATH))
+
         return {
             "cap_add": ["SYS_PTRACE"],
-            "hostname":
-            self.get_name(),
-            "container_name":
-            self.service_name(),
-            "command":
-            self.docker_command(),
-            "environment":
-            self.docker_env(),
-            "image":
-            self.get_image(),
+            "hostname": self.get_name(),
+            "container_name": self.service_name(),
+            "entrypoint": self.entrypoint(),
+            "environment": self.docker_env(),
+            "image": self.get_image(),
             "networks": {
                 utils.with_doris_prefix(self.cluster_name): {
                     "ipv4_address": self.get_ip(),
                 }
             },
-            "ports":
-            self.docker_ports(),
+            "ports": self.docker_ports(),
             "ulimits": {
                 "core": -1
             },
             "security_opt": ["seccomp:unconfined"],
-            "volumes": [
-                "{}:{}/{}/{}".format(os.path.join(self.get_path(),
-                                                  sub_dir), DOCKER_DORIS_PATH,
-                                     self.node_type(), sub_dir)
-                for sub_dir in self.expose_sub_dirs()
-            ] + [
-                "{}:{}:ro".format(LOCAL_RESOURCE_PATH, DOCKER_RESOURCE_PATH),
-                "{}:{}/{}/status".format(get_status_path(self.cluster_name),
-                                         DOCKER_DORIS_PATH, self.node_type()),
-            ] + [
-                "{0}:{0}:ro".format(path)
-                for path in ("/etc/localtime", "/etc/timezone",
-                             "/usr/share/zoneinfo") if os.path.exists(path)
-            ],
+            "volumes": volumes,
         }
 
 
 class FE(Node):
 
-    def docker_command(self):
-        return [
-            "bash",
-            os.path.join(DOCKER_RESOURCE_PATH, "init_fe.sh"),
-            #"{}/fe/bin/init_fe.sh".format(DOCKER_DORIS_PATH),
-        ]
+    def entrypoint(self):
+        return ["bash", os.path.join(DOCKER_RESOURCE_PATH, "init_fe.sh")]
 
     def docker_ports(self):
         return [FE_HTTP_PORT, FE_EDITLOG_PORT, FE_RPC_PORT, FE_QUERY_PORT]
@@ -300,12 +333,8 @@ class FE(Node):
 
 class BE(Node):
 
-    def docker_command(self):
-        return [
-            "bash",
-            os.path.join(DOCKER_RESOURCE_PATH, "init_be.sh"),
-            #"{}/be/bin/init_be.sh".format(DOCKER_DORIS_PATH),
-        ]
+    def entrypoint(self):
+        return ["bash", os.path.join(DOCKER_RESOURCE_PATH, "init_be.sh")]
 
     def docker_ports(self):
         return [BE_WEBSVR_PORT, BE_BRPC_PORT, BE_HEARTBEAT_PORT, BE_PORT]
@@ -355,25 +384,31 @@ class BE(Node):
 
 class Cluster(object):
 
-    def __init__(self, name, subnet, image, fe_config, be_config, be_disks):
+    def __init__(self, name, subnet, image, fe_config, be_config, be_disks,
+                 coverage_dir):
         self.name = name
         self.subnet = subnet
         self.image = image
         self.fe_config = fe_config
         self.be_config = be_config
         self.be_disks = be_disks
+        self.coverage_dir = coverage_dir
         self.groups = {
             node_type: Group(node_type)
             for node_type in Node.TYPE_ALL
         }
 
     @staticmethod
-    def new(name, image, fe_config, be_config, be_disks):
-        subnet = gen_subnet_prefix16()
-        cluster = Cluster(name, subnet, image, fe_config, be_config, be_disks)
-        os.makedirs(cluster.get_path(), exist_ok=True)
-        os.makedirs(get_status_path(name), exist_ok=True)
-        return cluster
+    def new(name, image, fe_config, be_config, be_disks, coverage_dir):
+        os.makedirs(LOCAL_DORIS_PATH, exist_ok=True)
+        with filelock.FileLock(os.path.join(LOCAL_DORIS_PATH, "lock")):
+            subnet = gen_subnet_prefix16()
+            cluster = Cluster(name, subnet, image, fe_config, be_config,
+                              be_disks, coverage_dir)
+            os.makedirs(cluster.get_path(), exist_ok=True)
+            os.makedirs(get_status_path(name), exist_ok=True)
+            cluster._save_meta()
+            return cluster
 
     @staticmethod
     def load(name):
@@ -423,15 +458,16 @@ class Cluster(object):
         meta = group.get_node(id)
         if not meta:
             raise Exception("No found {} with id {}".format(node_type, id))
-        return Node.new(self.name, node_type, id, self.subnet, meta)
+        return Node.new(self.name, self.coverage_dir, node_type, id,
+                        self.subnet, meta)
 
     def get_all_nodes(self, node_type):
         group = self.groups.get(node_type, None)
         if not group:
             raise Exception("Unknown node_type: {}".format(node_type))
         return [
-            Node.new(self.name, node_type, id, self.subnet, meta)
-            for id, meta in group.get_all_nodes().items()
+            Node.new(self.name, self.coverage_dir, node_type, id, self.subnet,
+                     meta) for id, meta in group.get_all_nodes().items()
         ]
 
     def get_all_nodes_num(self):

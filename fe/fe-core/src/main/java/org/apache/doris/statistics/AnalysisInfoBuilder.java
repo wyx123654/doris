@@ -61,6 +61,8 @@ public class AnalysisInfoBuilder {
     private CronExpression cronExpression;
     private boolean forceFull;
     private boolean usingSqlForPartitionColumn;
+    private long tblUpdateTime;
+    private boolean emptyJob;
 
     public AnalysisInfoBuilder() {
     }
@@ -97,6 +99,8 @@ public class AnalysisInfoBuilder {
         cronExpression = info.cronExpression;
         forceFull = info.forceFull;
         usingSqlForPartitionColumn = info.usingSqlForPartitionColumn;
+        tblUpdateTime = info.tblUpdateTime;
+        emptyJob = info.emptyJob;
     }
 
     public AnalysisInfoBuilder setJobId(long jobId) {
@@ -254,45 +258,22 @@ public class AnalysisInfoBuilder {
         return this;
     }
 
+    public AnalysisInfoBuilder setTblUpdateTime(long tblUpdateTime) {
+        this.tblUpdateTime = tblUpdateTime;
+        return this;
+    }
+
+    public AnalysisInfoBuilder setEmptyJob(boolean emptyJob) {
+        this.emptyJob = emptyJob;
+        return this;
+    }
+
     public AnalysisInfo build() {
         return new AnalysisInfo(jobId, taskId, taskIds, catalogId, dbId, tblId, colToPartitions, partitionNames,
                 colName, indexId, jobType, analysisMode, analysisMethod, analysisType, samplePercent,
                 sampleRows, maxBucketNum, periodTimeInMs, message, lastExecTimeInMs, timeCostInMs, state, scheduleType,
                 externalTableLevelTask, partitionOnly, samplingPartition, isAllPartition, partitionCount,
-                cronExpression, forceFull, usingSqlForPartitionColumn);
+                cronExpression, forceFull, usingSqlForPartitionColumn, tblUpdateTime, emptyJob);
     }
 
-    public AnalysisInfoBuilder copy() {
-        return new AnalysisInfoBuilder()
-                .setJobId(jobId)
-                .setTaskId(taskId)
-                .setTaskIds(taskIds)
-                .setCatalogId(catalogId)
-                .setDBId(dbId)
-                .setTblId(tblId)
-                .setColToPartitions(colToPartitions)
-                .setColName(colName)
-                .setIndexId(indexId)
-                .setJobType(jobType)
-                .setAnalysisMode(analysisMode)
-                .setAnalysisMethod(analysisMethod)
-                .setAnalysisType(analysisType)
-                .setSamplePercent(samplePercent)
-                .setSampleRows(sampleRows)
-                .setPeriodTimeInMs(periodTimeInMs)
-                .setMaxBucketNum(maxBucketNum)
-                .setMessage(message)
-                .setLastExecTimeInMs(lastExecTimeInMs)
-                .setTimeCostInMs(timeCostInMs)
-                .setState(state)
-                .setScheduleType(scheduleType)
-                .setExternalTableLevelTask(externalTableLevelTask)
-                .setSamplingPartition(samplingPartition)
-                .setPartitionOnly(partitionOnly)
-                .setAllPartition(isAllPartition)
-                .setPartitionCount(partitionCount)
-                .setCronExpression(cronExpression)
-                .setForceFull(forceFull)
-                .setUsingSqlForPartitionColumn(usingSqlForPartitionColumn);
-    }
 }

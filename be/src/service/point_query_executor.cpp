@@ -48,10 +48,10 @@
 namespace doris {
 
 Reusable::~Reusable() {}
-constexpr static int s_preallocted_blocks_num = 64;
+constexpr static int s_preallocted_blocks_num = 32;
 Status Reusable::init(const TDescriptorTable& t_desc_tbl, const std::vector<TExpr>& output_exprs,
                       size_t block_size) {
-    SCOPED_MEM_COUNT(&_mem_size);
+    SCOPED_MEM_COUNT_BY_HOOK(&_mem_size);
     _runtime_state = RuntimeState::create_unique();
     RETURN_IF_ERROR(DescriptorTbl::create(_runtime_state->obj_pool(), t_desc_tbl, &_desc_tbl));
     _runtime_state->set_desc_tbl(_desc_tbl);
@@ -111,11 +111,10 @@ LookupConnectionCache* LookupConnectionCache::create_global_instance(size_t capa
     return res;
 }
 
-RowCache::RowCache(int64_t capacity, int num_shards) {
-    // Create Row Cache
-    _cache = std::unique_ptr<Cache>(
-            new_lru_cache("RowCache", capacity, LRUCacheType::SIZE, num_shards));
-}
+RowCache::RowCache(int64_t capacity, int num_shards)
+        : LRUCachePolicy(CachePolicy::CacheType::POINT_QUERY_ROW_CACHE, capacity,
+                         LRUCacheType::SIZE, config::point_query_row_cache_stale_sweep_time_sec,
+                         num_shards) {}
 
 // Create global instance of this class
 RowCache* RowCache::create_global_cache(int64_t capacity, uint32_t num_shards) {
@@ -130,12 +129,12 @@ RowCache* RowCache::instance() {
 
 bool RowCache::lookup(const RowCacheKey& key, CacheHandle* handle) {
     const std::string& encoded_key = key.encode();
-    auto lru_handle = _cache->lookup(encoded_key);
+    auto lru_handle = cache()->lookup(encoded_key);
     if (!lru_handle) {
         // cache miss
         return false;
     }
-    *handle = CacheHandle(_cache.get(), lru_handle);
+    *handle = CacheHandle(cache(), lru_handle);
     return true;
 }
 
@@ -145,14 +144,14 @@ void RowCache::insert(const RowCacheKey& key, const Slice& value) {
     memcpy(cache_value, value.data, value.size);
     const std::string& encoded_key = key.encode();
     auto handle =
-            _cache->insert(encoded_key, cache_value, value.size, deleter, CachePriority::NORMAL);
+            cache()->insert(encoded_key, cache_value, value.size, deleter, CachePriority::NORMAL);
     // handle will released
-    auto tmp = CacheHandle {_cache.get(), handle};
+    auto tmp = CacheHandle {cache(), handle};
 }
 
 void RowCache::erase(const RowCacheKey& key) {
     const std::string& encoded_key = key.encode();
-    _cache->erase(encoded_key);
+    cache()->erase(encoded_key);
 }
 
 Status PointQueryExecutor::init(const PTabletKeyLookupRequest* request,
@@ -254,9 +253,8 @@ Status PointQueryExecutor::_init_keys(const PTabletKeyLookupRequest* request) {
         RowCursor cursor;
         RETURN_IF_ERROR(cursor.init_scan_key(_tablet->tablet_schema(), olap_tuples[i].values()));
         RETURN_IF_ERROR(cursor.from_tuple(olap_tuples[i]));
-        encode_key_with_padding<RowCursor, true, true>(&_row_read_ctxs[i]._primary_key, cursor,
-                                                       _tablet->tablet_schema()->num_key_columns(),
-                                                       true);
+        encode_key_with_padding<RowCursor, true>(&_row_read_ctxs[i]._primary_key, cursor,
+                                                 _tablet->tablet_schema()->num_key_columns(), true);
     }
     return Status::OK();
 }
@@ -287,7 +285,7 @@ Status PointQueryExecutor::_lookup_row_key() {
         auto rowset_ptr = std::make_unique<RowsetSharedPtr>();
         st = (_tablet->lookup_row_key(_row_read_ctxs[i]._primary_key, false, specified_rowsets,
                                       &location, INT32_MAX /*rethink?*/, segment_caches,
-                                      rowset_ptr.get()));
+                                      rowset_ptr.get(), false));
         if (st.is<ErrorCode::KEY_NOT_FOUND>()) {
             continue;
         }
@@ -335,7 +333,8 @@ Status PointQueryExecutor::_lookup_row_data() {
 template <typename MysqlWriter>
 Status _serialize_block(MysqlWriter& mysql_writer, vectorized::Block& block,
                         PTabletKeyLookupResponse* response) {
-    RETURN_IF_ERROR(mysql_writer.append_block(block));
+    block.clear_names();
+    RETURN_IF_ERROR(mysql_writer.write(block));
     assert(mysql_writer.results().size() == 1);
     uint8_t* buf = nullptr;
     uint32_t len = 0;

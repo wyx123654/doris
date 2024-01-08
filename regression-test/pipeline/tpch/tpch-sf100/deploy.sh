@@ -45,8 +45,8 @@ if [[ -z "${teamcity_build_checkoutDir}" ||
     exit 1
 fi
 if ${DEBUG:-false}; then
-    pull_request_id="26344"
-    commit_id="97ee15f75e88f5af6de308d948361eaa7c261602"
+    pull_request_id="26465"
+    commit_id="a532f7113f463e144e83918a37288f2649448482"
 fi
 
 echo "#### Deploy Doris ####"
@@ -88,34 +88,21 @@ storage_root_path=$(get_doris_conf_value "${DORIS_HOME}"/be/conf/be.conf storage
 mkdir -p "${meta_dir}"
 mkdir -p "${storage_root_path}"
 if ! start_doris_fe; then
-    echo "WARNING: Start doris fe failed at first time"
+    echo "ERROR: Start doris fe failed."
     print_doris_fe_log
-    echo "WARNING: delete meta_dir and storage_root_path, then retry"
-    rm -rf "${meta_dir:?}/"*
-    rm -rf "${storage_root_path:?}/"*
-    if ! start_doris_fe; then
-        need_backup_doris_logs=true
-        exit_flag=1
-    fi
-fi
-if ! start_doris_be; then
-    echo "WARNING: Start doris be failed at first time"
-    print_doris_be_log
-    echo "WARNING: delete storage_root_path, then retry"
-    rm -rf "${storage_root_path:?}/"*
-    if ! start_doris_be; then
-        need_backup_doris_logs=true
-        exit_flag=1
-    fi
-fi
-if ! add_doris_be_to_fe; then
     need_backup_doris_logs=true
     exit_flag=1
-else
-    # wait 10s for doris totally started, otherwize may encounter the error below,
-    # ERROR 1105 (HY000) at line 102: errCode = 2, detailMessage = Failed to find enough backend, please check the replication num,replication tag and storage medium.
-    sleep 10s
 fi
+if ! start_doris_be; then
+    echo "ERROR: Start doris be failed."
+    print_doris_be_log
+    need_backup_doris_logs=true
+    exit_flag=1
+fi
+
+# wait 10s for doris totally started, otherwize may encounter the error below,
+# ERROR 1105 (HY000) at line 102: errCode = 2, detailMessage = Failed to find enough backend, please check the replication num,replication tag and storage medium.
+sleep 10s
 
 echo "#### 5. set session variables"
 echo "TODO"
@@ -124,8 +111,8 @@ echo "#### 6. check if need backup doris logs"
 if ${need_backup_doris_logs}; then
     print_doris_fe_log
     print_doris_be_log
-    if archive_doris_logs "${DORIS_HOME}/${pull_request_id}_${commit_id}_doris_logs.tar.gz"; then
-        upload_doris_log_to_oss "${DORIS_HOME}/${pull_request_id}_${commit_id}_doris_logs.tar.gz"
+    if file_name=$(archive_doris_logs "${pull_request_id}_${commit_id}_doris_logs.tar.gz"); then
+        upload_doris_log_to_oss "${file_name}"
     fi
 fi
 

@@ -26,6 +26,7 @@
 
 #include "common/config.h"
 #include "common/status.h"
+#include "http/action/adjust_log_level.h"
 #include "http/action/check_rpc_channel_action.h"
 #include "http/action/check_tablet_segment_action.h"
 #include "http/action/checksum_action.h"
@@ -41,8 +42,10 @@
 #include "http/action/meta_action.h"
 #include "http/action/metrics_action.h"
 #include "http/action/pad_rowset_action.h"
+#include "http/action/pipeline_task_action.h"
 #include "http/action/pprof_actions.h"
 #include "http/action/reload_tablet_action.h"
+#include "http/action/report_action.h"
 #include "http/action/reset_rpc_channel_action.h"
 #include "http/action/restore_tablet_action.h"
 #include "http/action/snapshot_action.h"
@@ -156,6 +159,9 @@ Status HttpService::start() {
     _ev_http_server->register_handler(HttpMethod::HEAD, "/api/_binlog/_download",
                                       download_binlog_action);
 
+    AdjustLogLevelAction* adjust_log_level_action = _pool.add(new AdjustLogLevelAction());
+    _ev_http_server->register_handler(HttpMethod::POST, "api/glog/adjust", adjust_log_level_action);
+
     // Register BE version action
     VersionAction* version_action =
             _pool.add(new VersionAction(_env, TPrivilegeHier::GLOBAL, TPrivilegeType::NONE));
@@ -164,6 +170,11 @@ Status HttpService::start() {
     // Register BE health action
     HealthAction* health_action = _pool.add(new HealthAction());
     _ev_http_server->register_handler(HttpMethod::GET, "/api/health", health_action);
+
+    // Register BE health action
+    PipelineTaskAction* pipeline_task_action = _pool.add(new PipelineTaskAction());
+    _ev_http_server->register_handler(HttpMethod::GET, "/api/running_pipeline_tasks",
+                                      pipeline_task_action);
 
     // Register Tablets Info action
     TabletsInfoAction* tablets_info_action =
@@ -283,6 +294,18 @@ Status HttpService::start() {
             new ClearDebugPointsAction(_env, TPrivilegeHier::GLOBAL, TPrivilegeType::ADMIN));
     _ev_http_server->register_handler(HttpMethod::POST, "/api/debug_point/clear",
                                       clear_debug_points_action);
+
+    ReportAction* report_tablet_action = _pool.add(new ReportAction(
+            _env, TPrivilegeHier::GLOBAL, TPrivilegeType::ADMIN, "REPORT_OLAP_TABLE"));
+    _ev_http_server->register_handler(HttpMethod::GET, "/api/report/tablet", report_tablet_action);
+
+    ReportAction* report_disk_action = _pool.add(new ReportAction(
+            _env, TPrivilegeHier::GLOBAL, TPrivilegeType::ADMIN, "REPORT_DISK_STATE"));
+    _ev_http_server->register_handler(HttpMethod::GET, "/api/report/disk", report_disk_action);
+
+    ReportAction* report_task_action = _pool.add(
+            new ReportAction(_env, TPrivilegeHier::GLOBAL, TPrivilegeType::ADMIN, "REPORT_TASK"));
+    _ev_http_server->register_handler(HttpMethod::GET, "/api/report/task", report_task_action);
 
     _ev_http_server->start();
     return Status::OK();

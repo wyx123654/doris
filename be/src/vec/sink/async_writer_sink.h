@@ -61,10 +61,9 @@ public:
         RETURN_IF_ERROR(DataSink::prepare(state));
         // Prepare the exprs to run.
         RETURN_IF_ERROR(VExpr::prepare(_output_vexpr_ctxs, state, _row_desc));
-        std::stringstream title;
-        title << _name << " (frag_id=" << state->fragment_instance_id() << ")";
         // create profile
-        _profile = state->obj_pool()->add(new RuntimeProfile(title.str()));
+        _profile = state->obj_pool()->add(new RuntimeProfile(_name));
+        init_sink_common_profile();
         return Status::OK();
     }
 
@@ -80,7 +79,10 @@ public:
     }
 
     Status send(RuntimeState* state, vectorized::Block* block, bool eos = false) override {
-        return _writer->append_block(*block);
+        SCOPED_TIMER(_exec_timer);
+        COUNTER_UPDATE(_blocks_sent_counter, 1);
+        COUNTER_UPDATE(_output_rows_counter, block->rows());
+        return _writer->write(*block);
     }
 
     Status sink(RuntimeState* state, vectorized::Block* block, bool eos = false) override {

@@ -83,6 +83,7 @@ Status VResultSink::prepare(RuntimeState* state) {
                              fragment_instance_id.hi, fragment_instance_id.lo);
     // create profile
     _profile = state->obj_pool()->add(new RuntimeProfile(title));
+    init_sink_common_profile();
     // prepare output_expr
     RETURN_IF_ERROR(prepare_exprs(state));
 
@@ -133,11 +134,14 @@ Status VResultSink::second_phase_fetch_data(RuntimeState* state, Block* final_bl
 }
 
 Status VResultSink::send(RuntimeState* state, Block* block, bool eos) {
+    SCOPED_TIMER(_exec_timer);
+    COUNTER_UPDATE(_blocks_sent_counter, 1);
+    COUNTER_UPDATE(_output_rows_counter, block->rows());
     if (_fetch_option.use_two_phase_fetch && block->rows() > 0) {
         DCHECK(_sink_type == TResultSinkType::MYSQL_PROTOCAL);
         RETURN_IF_ERROR(second_phase_fetch_data(state, block));
     }
-    RETURN_IF_ERROR(_writer->append_block(*block));
+    RETURN_IF_ERROR(_writer->write(*block));
     if (_fetch_option.use_two_phase_fetch) {
         // Block structure may be changed by calling _second_phase_fetch_data().
         // So we should clear block in case of unmatched columns

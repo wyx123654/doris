@@ -36,7 +36,6 @@
 #include "olap/olap_common.h"
 #include "olap/rowset/rowset_meta.h"
 #include "olap/tablet_schema.h"
-#include "util/lock.h"
 
 namespace doris {
 
@@ -295,6 +294,14 @@ public:
 
     [[nodiscard]] virtual Status add_to_binlog() { return Status::OK(); }
 
+    // is skip index compaction this time
+    bool is_skip_index_compaction(int32_t column_id) const {
+        return skip_index_compaction.find(column_id) != skip_index_compaction.end();
+    }
+
+    // set skip index compaction next time
+    void set_skip_index_compaction(int32_t column_id) { skip_index_compaction.insert(column_id); }
+
 protected:
     friend class RowsetFactory;
 
@@ -321,13 +328,16 @@ protected:
     bool _is_cumulative; // rowset is cumulative iff it's visible and start version < end version
 
     // mutex lock for load/close api because it is costly
-    doris::Mutex _lock;
+    std::mutex _lock;
     bool _need_delete_file = false;
     // variable to indicate how many rowset readers owned this rowset
     std::atomic<uint64_t> _refs_by_reader;
     // rowset state machine
     RowsetStateMachine _rowset_state_machine;
     std::atomic<uint64_t> _delayed_expired_timestamp = 0;
+
+    // <column_uniq_id>, skip index compaction
+    std::set<int32_t> skip_index_compaction;
 };
 
 } // namespace doris

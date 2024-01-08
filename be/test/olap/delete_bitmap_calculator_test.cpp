@@ -71,7 +71,10 @@ static TabletColumn create_int_sequence_value(int32_t id, bool is_nullable = tru
 class DeleteBitmapCalculatorTest : public testing::Test {
 public:
     void SetUp() override {
-        EXPECT_TRUE(io::global_local_filesystem()->delete_and_create_directory(kSegmentDir).ok());
+        auto st = io::global_local_filesystem()->delete_directory(kSegmentDir);
+        ASSERT_TRUE(st.ok()) << st;
+        st = io::global_local_filesystem()->create_directory(kSegmentDir);
+        ASSERT_TRUE(st.ok()) << st;
         doris::EngineOptions options;
         k_engine = new StorageEngine(options);
         ExecEnv::GetInstance()->set_storage_engine(k_engine);
@@ -227,7 +230,7 @@ public:
         MergeIndexDeleteBitmapCalculator calculator;
         size_t seq_col_len = 0;
         if (has_sequence_col) {
-            seq_col_len = tablet_schema->column(tablet_schema->sequence_col_idx()).length();
+            seq_col_len = tablet_schema->column(tablet_schema->sequence_col_idx()).length() + 1;
         }
 
         ASSERT_TRUE(calculator.init(rowset_id, segments, seq_col_len).ok());

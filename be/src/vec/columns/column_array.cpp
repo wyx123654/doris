@@ -95,11 +95,11 @@ ColumnArray::ColumnArray(MutableColumnPtr&& nested_column, MutableColumnPtr&& of
         LOG(FATAL) << "offsets_column must be a ColumnUInt64";
     }
 
-    if (!offsets_concrete->empty() && nested_column) {
+    if (!offsets_concrete->empty() && data) {
         auto last_offset = offsets_concrete->get_data().back();
 
         /// This will also prevent possible overflow in offset.
-        if (nested_column->size() != last_offset) {
+        if (data->size() != last_offset) {
             LOG(FATAL) << "offsets_column has data inconsistent with nested_column";
         }
     }
@@ -252,6 +252,26 @@ StringRef ColumnArray::serialize_value_into_arena(size_t n, Arena& arena,
     }
 
     return res;
+}
+
+int ColumnArray::compare_at(size_t n, size_t m, const IColumn& rhs_, int nan_direction_hint) const {
+    // since column type is complex, we can't use this function
+    const auto& rhs = assert_cast<const ColumnArray&>(rhs_);
+
+    size_t lhs_size = size_at(n);
+    size_t rhs_size = rhs.size_at(m);
+    size_t min_size = std::min(lhs_size, rhs_size);
+    for (size_t i = 0; i < min_size; ++i) {
+        if (int res = get_data().compare_at(offset_at(n) + i, rhs.offset_at(m) + i, *rhs.data.get(),
+                                            nan_direction_hint);
+            res) {
+            // if res != 0 , here is something different ,just return
+            return res;
+        }
+    }
+
+    // then we check size of array
+    return lhs_size < rhs_size ? -1 : (lhs_size == rhs_size ? 0 : 1);
 }
 
 const char* ColumnArray::deserialize_and_insert_from_arena(const char* pos) {
@@ -797,14 +817,10 @@ size_t ColumnArray::filter_nullable(const Filter& filter) {
     return result_size;
 }
 
-void ColumnArray::insert_indices_from(const IColumn& src, const int* indices_begin,
-                                      const int* indices_end) {
-    for (auto x = indices_begin; x != indices_end; ++x) {
-        if (*x == -1) {
-            ColumnArray::insert_default();
-        } else {
-            ColumnArray::insert_from(src, *x);
-        }
+void ColumnArray::insert_indices_from(const IColumn& src, const uint32_t* indices_begin,
+                                      const uint32_t* indices_end) {
+    for (const auto* x = indices_begin; x != indices_end; ++x) {
+        ColumnArray::insert_from(src, *x);
     }
 }
 
@@ -833,42 +849,35 @@ ColumnPtr ColumnArray::replicate(const IColumn::Offsets& replicate_offsets) cons
     return replicate_generic(replicate_offsets);
 }
 
-void ColumnArray::replicate(const uint32_t* indexs, size_t target_size, IColumn& column) const {
+void ColumnArray::replicate(const uint32_t* indices, size_t target_size, IColumn& column) const {
     if (target_size == 0) {
         return;
     }
-    auto total_size = get_offsets().size();
-    // |---------------------|-------------------------|-------------------------|
-    // [0, begin)             [begin, begin + count_sz)  [begin + count_sz, size())
-    //  do not need to copy    copy counts[n] times       do not need to copy
-    IColumn::Offsets replicate_offsets(total_size, 0);
-    // copy original data at offset n counts[n] times
-    auto begin = 0, end = 0;
-    while (begin < target_size) {
-        while (end < target_size && indexs[begin] == indexs[end]) {
-            end++;
+
+    auto& dst_col = assert_cast<ColumnArray&>(column);
+    auto& dst_data_col = dst_col.get_data();
+    auto& dst_offsets = dst_col.get_offsets();
+    dst_offsets.reserve(target_size);
+
+    PODArray<uint32> data_indices_to_replicate;
+
+    for (size_t i = 0; i < target_size; ++i) {
+        const auto index = indices[i];
+        const auto start = offset_at(index);
+        const auto length = size_at(index);
+        dst_offsets.push_back(dst_offsets.back() + length);
+        if (UNLIKELY(length == 0)) {
+            continue;
         }
-        long index = indexs[begin];
-        replicate_offsets[index] = end - begin;
-        begin = end;
+
+        data_indices_to_replicate.reserve(data_indices_to_replicate.size() + length);
+        for (size_t j = start; j != start + length; ++j) {
+            data_indices_to_replicate.push_back(j);
+        }
     }
 
-    // ignored
-    for (size_t i = 1; i < total_size; ++i) {
-        replicate_offsets[i] += replicate_offsets[i - 1];
-    }
-
-    auto rep_res = replicate(replicate_offsets);
-    if (!rep_res) {
-        LOG(WARNING) << "ColumnArray replicate failed, replicate_offsets count="
-                     << replicate_offsets.size() << ", max=" << replicate_offsets.back();
-        return;
-    }
-    auto& rep_res_arr = typeid_cast<const ColumnArray&>(*rep_res);
-
-    ColumnArray& res_arr = typeid_cast<ColumnArray&>(column);
-    res_arr.data = rep_res_arr.get_data_ptr();
-    res_arr.offsets = rep_res_arr.get_offsets_ptr();
+    get_data().replicate(data_indices_to_replicate.data(), data_indices_to_replicate.size(),
+                         dst_data_col);
 }
 
 template <typename T>

@@ -34,7 +34,7 @@ class ClusterOptions {
 
     int feNum = 1
     int beNum = 3
-    List<String> feConfigs = []
+    List<String> feConfigs = ['heartbeat_interval_second=5']
     List<String> beConfigs = []
 
     // each be disks, a disks format is: disk_type=disk_num[,disk_capacity]
@@ -83,6 +83,10 @@ class ServerNode {
         node.host = (String) fields.get(header.indexOf('IP'))
         node.httpPort = (Integer) fields.get(header.indexOf('http_port'))
         node.alive = fields.get(header.indexOf('alive')) == 'true'
+    }
+
+    static long toLongOrDefault(Object val, long defValue) {
+        return val == '' ? defValue : (long) val
     }
 
     def getHttpAddress() {
@@ -137,8 +141,8 @@ class Backend extends ServerNode {
     static Backend fromCompose(ListHeader header, int index, List<Object> fields) {
         Backend be = new Backend()
         ServerNode.fromCompose(be, header, index, fields)
-        be.backendId = (long) fields.get(header.indexOf('backend_id'))
-        be.tabletNum = (int) fields.get(header.indexOf('tablet_num'))
+        be.backendId = toLongOrDefault(fields.get(header.indexOf('backend_id')), -1L)
+        be.tabletNum = (int) toLongOrDefault(fields.get(header.indexOf('tablet_num')), 0L)
         return be
     }
 
@@ -156,52 +160,53 @@ class SuiteCluster {
 
     final String name
     final Config config
-    private boolean inited
+    private boolean running
 
     SuiteCluster(String name, Config config) {
         this.name = name
         this.config = config
-        this.inited = false
+        this.running = false
     }
 
     void init(ClusterOptions options) {
-        if (inited) {
-            return
-        }
-
         assert name != null && name != ''
         assert options.feNum > 0 || options.beNum > 0
         assert config.image != null && config.image != ''
 
-        def sb = new StringBuilder()
-        sb.append('up ' + name + ' ')
-        sb.append(config.image + ' ')
+        def cmd = [
+            'up', name, config.image
+        ]
+
         if (options.feNum > 0) {
-            sb.append('--add-fe-num ' + options.feNum + ' ')
+            cmd += ['--add-fe-num', String.valueOf(options.feNum)]
         }
         if (options.beNum > 0) {
-            sb.append('--add-be-num ' + options.beNum + ' ')
+            cmd += ['--add-be-num', String.valueOf(options.beNum)]
         }
         // TODO: need escape white space in config
         if (options.feConfigs != null && options.feConfigs.size() > 0) {
-            sb.append('--fe-config ')
-            options.feConfigs.forEach(item -> sb.append(' ' + item + ' '))
+            cmd += ['--fe-config']
+            cmd += options.feConfigs
         }
         if (options.beConfigs != null && options.beConfigs.size() > 0) {
-            sb.append('--be-config ')
-            options.beConfigs.forEach(item -> sb.append(' ' + item + ' '))
+            cmd += ['--be-config']
+            cmd += options.beConfigs
         }
         if (options.beDisks != null) {
-            sb.append('--be-disks ' + options.beDisks.join(" ") + ' ')
+            cmd += ['--be-disks']
+            cmd += options.beDisks
         }
-        sb.append('--wait-timeout 180')
+        if (config.dockerCoverageOutputDir != null && config.dockerCoverageOutputDir != '') {
+            cmd += ['--coverage-dir', config.dockerCoverageOutputDir]
+        }
+        cmd += ['--wait-timeout', String.valueOf(180)]
 
-        runCmd(sb.toString(), -1)
+        runCmd(cmd.join(' '), -1)
 
         // wait be report disk
         Thread.sleep(5000)
 
-        inited = true
+        running = true
     }
 
     void injectDebugPoints(NodeType type, Map<String, Map<String, String>> injectPoints) {
@@ -326,12 +331,19 @@ class SuiteCluster {
     }
 
     void destroy(boolean clean) throws Exception {
-        def cmd = 'down ' + name
-        if (clean) {
-            cmd += ' --clean'
+        try {
+            def cmd = 'down ' + name
+            if (clean) {
+                cmd += ' --clean'
+            }
+            runCmd(cmd)
+        } finally {
+            running = false
         }
-        runCmd(cmd)
-        inited = false
+    }
+
+    boolean isRunning() {
+        return running
     }
 
     // if not specific fe indices, then start all frontends
@@ -430,7 +442,8 @@ class SuiteCluster {
     }
 
     private void waitHbChanged() {
-        Thread.sleep(6000)
+        // heart beat interval is 5s
+        Thread.sleep(7000)
     }
 
     private void runFrontendsCmd(String op, int... indices) {
@@ -459,14 +472,15 @@ class SuiteCluster {
         } else {
             proc.waitFor()
         }
-        def out = outBuf.toString()
-        def err = errBuf.toString()
-        if (proc.exitValue()) {
+        if (proc.exitValue() != 0) {
             throw new Exception(String.format('Exit value: %s != 0, stdout: %s, stderr: %s',
-                                              proc.exitValue(), out, err))
+                                              proc.exitValue(), outBuf.toString(), errBuf.toString()))
         }
         def parser = new JsonSlurper()
-        def object = (Map<String, Object>) parser.parseText(out)
+        if (outBuf.toString().size() == 0) {
+            throw new Exception(String.format('doris compose output is empty, err: %s', errBuf.toString()))
+        }
+        def object = (Map<String, Object>) parser.parseText(outBuf.toString())
         if (object.get('code') != 0) {
             throw new Exception(String.format('Code: %s != 0, err: %s', object.get('code'), object.get('err')))
         }
