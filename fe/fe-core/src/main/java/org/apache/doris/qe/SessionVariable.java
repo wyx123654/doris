@@ -28,8 +28,7 @@ import org.apache.doris.common.io.Writable;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.nereids.metrics.Event;
 import org.apache.doris.nereids.metrics.EventSwitchParser;
-import org.apache.doris.nereids.parser.ParseDialect;
-import org.apache.doris.nereids.parser.ParseDialect.Dialect;
+import org.apache.doris.nereids.parser.Dialect;
 import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.planner.GroupCommitBlockSink;
 import org.apache.doris.qe.VariableMgr.VarAttr;
@@ -566,6 +565,12 @@ public class SessionVariable implements Serializable, Writable {
     // if true, need report to coordinator when plan fragment execute successfully.
     @VariableMgr.VarAttr(name = ENABLE_PROFILE, needForward = true)
     public boolean enableProfile = false;
+
+    @VariableMgr.VarAttr(name = "runtime_filter_prune_for_external")
+    public boolean runtimeFilterPruneForExternal = true;
+
+    @VariableMgr.VarAttr(name = "runtime_filter_jump_threshold")
+    public int runtimeFilterJumpThreshold = 2;
 
     // using hashset instead of group by + count can improve performance
     //        but may cause rpc failed when cluster has less BE
@@ -2327,8 +2332,8 @@ public class SessionVariable implements Serializable, Writable {
         return waitFullBlockScheduleTimes;
     }
 
-    public ParseDialect.Dialect getSqlParseDialect() {
-        return ParseDialect.Dialect.getByName(sqlDialect);
+    public Dialect getSqlParseDialect() {
+        return Dialect.getByName(sqlDialect);
     }
 
     public void setSqlDialect(String sqlDialect) {
