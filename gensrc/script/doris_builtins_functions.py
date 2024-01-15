@@ -1791,9 +1791,9 @@ visible_functions = {
         [['json_unquote'], 'VARCHAR', ['VARCHAR'], 'ALWAYS_NULLABLE'],
         [['json_extract'], 'VARCHAR', ['VARCHAR', 'VARCHAR', '...'], 'ALWAYS_NULLABLE'],
         [['json_extract'], 'STRING', ['STRING', 'STRING', '...'], 'ALWAYS_NULLABLE'],
-        [['json_insert'], 'VARCHAR', ['VARCHAR', 'VARCHAR', '...'], ''],
-        [['json_replace'], 'VARCHAR', ['VARCHAR', 'VARCHAR', '...'], ''],
-        [['json_set'], 'VARCHAR', ['VARCHAR', 'VARCHAR', '...'], '']
+        [['json_insert'], 'VARCHAR', ['VARCHAR', 'VARCHAR', 'VARCHAR', '...'], ''],
+        [['json_replace'], 'VARCHAR', ['VARCHAR', 'VARCHAR', 'VARCHAR', '...'], ''],
+        [['json_set'], 'VARCHAR', ['VARCHAR', 'VARCHAR', 'VARCHAR', '...'], '']
     ],
 
 
@@ -2005,18 +2005,21 @@ visible_functions = {
         [['ipv4_string_to_num_or_null'], 'BIGINT', ['VARCHAR'], 'ALWAYS_NULLABLE'],
         [['ipv4_string_to_num_or_null'], 'BIGINT', ['STRING'], 'ALWAYS_NULLABLE'],  
         [['ipv6_num_to_string','inet6_ntoa'], 'VARCHAR', ['VARCHAR'], 'ALWAYS_NULLABLE'],     
-        [['ipv6_num_to_string','inet6_ntoa'], 'STRING', ['STRING'], 'ALWAYS_NULLABLE'],       
+        [['ipv6_num_to_string','inet6_ntoa'], 'STRING', ['STRING'], 'ALWAYS_NULLABLE'],
+        [['ipv6_num_to_string','inet6_ntoa'], 'VARCHAR', ['IPV6'], 'ALWAYS_NULLABLE'],
+        [['ipv6_num_to_string','inet6_ntoa'], 'STRING', ['IPV6'], 'ALWAYS_NULLABLE'],
         [['ipv6_string_to_num','inet6_aton'], 'VARCHAR', ['VARCHAR'], 'ALWAYS_NOT_NULLABLE'],
         [['ipv6_string_to_num','inet6_aton'], 'STRING', ['STRING'], 'ALWAYS_NOT_NULLABLE'],
         [['ipv6_string_to_num_or_default'], 'VARCHAR', ['VARCHAR'], 'ALWAYS_NOT_NULLABLE'],
         [['ipv6_string_to_num_or_default'], 'STRING', ['STRING'], 'ALWAYS_NOT_NULLABLE'],
         [['ipv6_string_to_num_or_null'], 'VARCHAR', ['VARCHAR'], 'ALWAYS_NULLABLE'],
         [['ipv6_string_to_num_or_null'], 'STRING', ['STRING'], 'ALWAYS_NULLABLE'],  
-        [['ipv6numtostring','inet6_ntoa'], 'STRING', ['STRING'], 'ALWAYS_NULLABLE'],
-        [['isipv4string'], 'BOOLEAN', ['VARCHAR'], 'ALWAYS_NULLABLE'],
-        [['isipv4string'], 'BOOLEAN', ['STRING'], 'ALWAYS_NULLABLE'],
-        [['isipv6string'], 'BOOLEAN', ['VARCHAR'], 'ALWAYS_NULLABLE'],
-        [['isipv6string'], 'BOOLEAN', ['STRING'], 'ALWAYS_NULLABLE'],
+        [['is_ipv4_string'], 'BOOLEAN', ['VARCHAR'], 'ALWAYS_NULLABLE'],
+        [['is_ipv4_string'], 'BOOLEAN', ['STRING'], 'ALWAYS_NULLABLE'],
+        [['is_ipv6_string'], 'BOOLEAN', ['VARCHAR'], 'ALWAYS_NULLABLE'],
+        [['is_ipv6_string'], 'BOOLEAN', ['STRING'], 'ALWAYS_NULLABLE'],
+        [['is_ip_address_in_range'], 'BOOLEAN', ['VARCHAR', 'VARCHAR'], 'ALWAYS_NOT_NULLABLE'],
+        [['is_ip_address_in_range'], 'BOOLEAN', ['STRING', 'STRING'], 'ALWAYS_NOT_NULLABLE'],
     ],
 
     "NonNullalbe": [

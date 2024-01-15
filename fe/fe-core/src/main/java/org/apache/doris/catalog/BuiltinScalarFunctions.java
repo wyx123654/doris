@@ -168,6 +168,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.FromMicroseco
 import org.apache.doris.nereids.trees.expressions.functions.scalar.FromMillisecond;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.FromSecond;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.FromUnixtime;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.G;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonBigInt;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonDouble;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonInt;
@@ -198,6 +199,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.Ipv6NumToStri
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Ipv6StringToNum;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Ipv6StringToNumOrDefault;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Ipv6StringToNumOrNull;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.IsIpAddressInRange;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.IsIpv4String;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.IsIpv6String;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.JsonArray;
@@ -571,6 +573,7 @@ public class BuiltinScalarFunctions implements FunctionHelper {
             scalar(FromBase64.class, "from_base64"),
             scalar(FromDays.class, "from_days"),
             scalar(FromUnixtime.class, "from_unixtime"),
+            scalar(G.class, "g"),
             scalar(GetJsonBigInt.class, "get_json_bigint"),
             scalar(GetJsonDouble.class, "get_json_double"),
             scalar(GetJsonInt.class, "get_json_int"),
@@ -601,8 +604,9 @@ public class BuiltinScalarFunctions implements FunctionHelper {
             scalar(Ipv6StringToNum.class, "ipv6_string_to_num", "inet6_aton"),
             scalar(Ipv6StringToNumOrDefault.class, "ipv6_string_to_num_or_default"),
             scalar(Ipv6StringToNumOrNull.class, "ipv6_string_to_num_or_null"),
-            scalar(IsIpv4String.class, "isipv4string"),
-            scalar(IsIpv6String.class, "isipv6string"),
+            scalar(IsIpv4String.class, "is_ipv4_string"),
+            scalar(IsIpv6String.class, "is_ipv6_string"),
+            scalar(IsIpAddressInRange.class, "is_ip_address_in_range"),
             scalar(JsonArray.class, "json_array"),
             scalar(JsonObject.class, "json_object"),
             scalar(JsonQuote.class, "json_quote"),

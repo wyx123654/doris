@@ -43,6 +43,7 @@
 #include "common/status.h"
 #include "runtime/descriptors.h"
 #include "runtime/query_statistics.h"
+#include "runtime/task_execution_context.h"
 #include "util/runtime_profile.h"
 #include "util/stopwatch.hpp"
 #include "vec/columns/column.h"
@@ -55,7 +56,6 @@ namespace doris {
 class MemTracker;
 class PBlock;
 class MemTrackerLimiter;
-class PQueryStatistics;
 class RuntimeState;
 
 namespace pipeline {
@@ -70,13 +70,12 @@ class VSortedRunMerger;
 
 class VDataStreamRecvr;
 
-class VDataStreamRecvr {
+class VDataStreamRecvr : public HasTaskExecutionCtx {
 public:
     class SenderQueue;
     VDataStreamRecvr(VDataStreamMgr* stream_mgr, RuntimeState* state, const RowDescriptor& row_desc,
                      const TUniqueId& fragment_instance_id, PlanNodeId dest_node_id,
-                     int num_senders, bool is_merging, RuntimeProfile* profile,
-                     std::shared_ptr<QueryStatisticsRecvr> sub_plan_query_statistics_recvr);
+                     int num_senders, bool is_merging, RuntimeProfile* profile);
 
     virtual ~VDataStreamRecvr();
 
@@ -102,16 +101,9 @@ public:
     PlanNodeId dest_node_id() const { return _dest_node_id; }
     const RowDescriptor& row_desc() const { return _row_desc; }
 
-    void add_sub_plan_statistics(const PQueryStatistics& statistics, int sender_id) {
-        _sub_plan_query_statistics_recvr->insert(statistics, sender_id);
-    }
-
     // Indicate that a particular sender is done. Delegated to the appropriate
     // sender queue. Called from DataStreamMgr.
     void remove_sender(int sender_id, int be_number, Status exec_status);
-
-    void remove_sender(int sender_id, int be_number, QueryStatisticsPtr statistics,
-                       Status exec_status);
 
     void cancel_stream(Status exec_status);
 
@@ -183,8 +175,6 @@ private:
     // Number of blocks received
     RuntimeProfile::Counter* _blocks_produced_counter = nullptr;
 
-    std::shared_ptr<QueryStatisticsRecvr> _sub_plan_query_statistics_recvr;
-
     bool _enable_pipeline;
     std::vector<std::shared_ptr<pipeline::LocalExchangeChannelDependency>>
             _sender_to_local_channel_dependency;
@@ -212,7 +202,7 @@ public:
         _local_channel_dependency = local_channel_dependency;
     }
 
-    virtual bool should_wait();
+    bool should_wait();
 
     virtual Status get_batch(Block* next_block, bool* eos);
 
