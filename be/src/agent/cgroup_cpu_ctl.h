@@ -29,16 +29,13 @@
 namespace doris {
 
 // cgroup cpu.cfs_quota_us default value, it means disable cpu hard limit
-const static int CPU_HARD_LIMIT_DEFAULT_VALUE = -1;
-
-// cgroup cpu.shares default value
-const static uint64_t CPU_SOFT_LIMIT_DEFAULT_VALUE = 1024;
+const static int CGROUP_CPU_HARD_LIMIT_DEFAULT_VALUE = -1;
 
 class CgroupCpuCtl {
 public:
     virtual ~CgroupCpuCtl() = default;
     CgroupCpuCtl() = default;
-    CgroupCpuCtl(uint64_t tg_id) { _tg_id = tg_id; }
+    CgroupCpuCtl(uint64_t wg_id) { _wg_id = wg_id; }
 
     virtual Status init();
 
@@ -66,7 +63,7 @@ protected:
     int _cpu_hard_limit = 0;
     std::shared_mutex _lock_mutex;
     bool _init_succ = false;
-    uint64_t _tg_id = -1; // workload group id
+    uint64_t _wg_id = -1; // workload group id
     uint64_t _cpu_shares = 0;
 };
 

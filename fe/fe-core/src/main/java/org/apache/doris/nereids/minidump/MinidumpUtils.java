@@ -241,12 +241,14 @@ public class MinidumpUtils {
     }
 
     private static ColumnStatistic getColumnStatistic(TableIf table, String colName) {
+        // TODO. Get index id for materialized view.
         return Env.getCurrentEnv().getStatisticsCache().getColumnStatistics(
-            table.getDatabase().getCatalog().getId(), table.getDatabase().getId(), table.getId(), colName);
+            table.getDatabase().getCatalog().getId(), table.getDatabase().getId(), table.getId(), -1, colName);
     }
 
     private static Histogram getColumnHistogram(TableIf table, String colName) {
-        return Env.getCurrentEnv().getStatisticsCache().getHistogram(table.getId(), colName);
+        return Env.getCurrentEnv().getStatisticsCache().getHistogram(
+                table.getDatabase().getCatalog().getId(), table.getDatabase().getId(), table.getId(), colName);
     }
 
     /**

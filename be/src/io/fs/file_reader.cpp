@@ -20,21 +20,46 @@
 #include <bthread/bthread.h>
 #include <glog/logging.h>
 
+#include "io/cache/cached_remote_file_reader.h"
 #include "io/fs/file_system.h"
+#include "runtime/thread_context.h"
+#include "runtime/workload_management/io_throttle.h"
 #include "util/async_io.h"
 
-namespace doris {
-namespace io {
+namespace doris::io {
+
+const std::string FileReader::VIRTUAL_REMOTE_DATA_DIR = "virtual_remote_data_dir";
 
 Status FileReader::read_at(size_t offset, Slice result, size_t* bytes_read,
                            const IOContext* io_ctx) {
     DCHECK(bthread_self() == 0);
+    std::shared_ptr<IOThrottle> iot = nullptr;
+    if (auto* t_ctx = doris::thread_context(true)) {
+        iot = t_ctx->io_throttle(get_data_dir_path());
+    }
+    if (iot) {
+        iot->acquire(-1);
+    }
     Status st = read_at_impl(offset, result, bytes_read, io_ctx);
+    if (iot) {
+        iot->update_next_io_time(*bytes_read);
+    }
     if (!st) {
         LOG(WARNING) << st;
     }
     return st;
 }
 
-} // namespace io
-} // namespace doris
+Result<FileReaderSPtr> create_cached_file_reader(FileReaderSPtr raw_reader,
+                                                 const FileReaderOptions& opts) {
+    switch (opts.cache_type) {
+    case io::FileCachePolicy::NO_CACHE:
+        return raw_reader;
+    case FileCachePolicy::FILE_BLOCK_CACHE:
+        return std::make_shared<CachedRemoteFileReader>(std::move(raw_reader), opts);
+    default:
+        return ResultError(Status::InternalError("Unknown cache type: {}", opts.cache_type));
+    }
+}
+
+} // namespace doris::io

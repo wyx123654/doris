@@ -90,7 +90,7 @@ import java.util.concurrent.Executors;
 
 /**
  * Implementation of Arrow Flight SQL service
- *
+ * <p>
  * All methods must catch all possible Exceptions, print and throw CallStatus,
  * otherwise error message will be discarded.
  */
@@ -224,8 +224,13 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
                 }
             } else {
                 // Now only query stmt will pull results from BE.
-                final ByteString handle = ByteString.copyFromUtf8(
-                        DebugUtil.printId(connectContext.getFinstId()) + ":" + query);
+                final ByteString handle;
+                if (connectContext.getSessionVariable().enableParallelResultSink()) {
+                    handle = ByteString.copyFromUtf8(DebugUtil.printId(connectContext.queryId()) + ":" + query);
+                } else {
+                    // only one instance
+                    handle = ByteString.copyFromUtf8(DebugUtil.printId(connectContext.getFinstId()) + ":" + query);
+                }
                 Schema schema = flightSQLConnectProcessor.fetchArrowFlightSchema(5000);
                 if (schema == null) {
                     throw CallStatus.INTERNAL.withDescription("fetch arrow flight schema is null").toRuntimeException();
@@ -238,16 +243,16 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
                         connectContext.getResultFlightServerAddr().port);
                 List<FlightEndpoint> endpoints = Collections.singletonList(new FlightEndpoint(ticket, location));
                 // TODO Set in BE callback after query end, Client will not callback.
-                connectContext.setCommand(MysqlCommand.COM_SLEEP);
                 return new FlightInfo(schema, descriptor, endpoints, -1, -1);
             }
         } catch (Exception e) {
-            connectContext.setCommand(MysqlCommand.COM_SLEEP);
             String errMsg = "get flight info statement failed, " + e.getMessage() + ", " + Util.getRootCauseMessage(e)
                     + ", error code: " + connectContext.getState().getErrorCode() + ", error msg: "
                     + connectContext.getState().getErrorMessage();
             LOG.warn(errMsg, e);
             throw CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException();
+        } finally {
+            connectContext.setCommand(MysqlCommand.COM_SLEEP);
         }
     }
 
@@ -306,6 +311,7 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
         executorService.submit(() -> {
             ConnectContext connectContext = flightSessionsManager.getConnectContext(context.peerIdentity());
             try {
+                connectContext.setCommand(MysqlCommand.COM_QUERY);
                 final String query = request.getQuery();
                 String preparedStatementId = UUID.randomUUID().toString();
                 final ByteString handle = ByteString.copyFromUtf8(context.peerIdentity() + ":" + preparedStatementId);
@@ -323,7 +329,6 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
                         Any.pack(buildCreatePreparedStatementResult(handle, parameterSchema, metaData))
                                 .toByteArray()));
             } catch (Exception e) {
-                connectContext.setCommand(MysqlCommand.COM_SLEEP);
                 String errMsg = "create prepared statement failed, " + e.getMessage() + ", "
                         + Util.getRootCauseMessage(e) + ", error code: " + connectContext.getState().getErrorCode()
                         + ", error msg: " + connectContext.getState().getErrorMessage();
@@ -333,6 +338,8 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
             } catch (final Throwable t) {
                 listener.onError(CallStatus.INTERNAL.withDescription("Unknown error: " + t).toRuntimeException());
                 return;
+            } finally {
+                connectContext.setCommand(MysqlCommand.COM_SLEEP);
             }
             listener.onCompleted();
         });

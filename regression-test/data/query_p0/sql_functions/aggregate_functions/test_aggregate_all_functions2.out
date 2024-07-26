@@ -45,10 +45,10 @@
 5
 
 -- !select_percentile_approx1 --
-\N
+0.0
 
 -- !select_percentile_array --
-[1985.1999999999998, 1989, 20456.999999999989]
+[255, 1989, 1991]
 
 -- !select_array_product --
 \N

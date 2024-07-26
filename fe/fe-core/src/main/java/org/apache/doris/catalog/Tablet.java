@@ -20,12 +20,13 @@ package org.apache.doris.catalog;
 import org.apache.doris.catalog.Replica.ReplicaState;
 import org.apache.doris.clone.TabletSchedCtx;
 import org.apache.doris.clone.TabletSchedCtx.Priority;
+import org.apache.doris.cloud.catalog.CloudReplica;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.Pair;
+import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Text;
-import org.apache.doris.common.io.Writable;
 import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.resource.Tag;
 import org.apache.doris.system.Backend;
@@ -42,7 +43,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -58,7 +58,7 @@ import java.util.stream.LongStream;
 /**
  * This class represents the olap tablet related metadata.
  */
-public class Tablet extends MetaObject implements Writable {
+public class Tablet extends MetaObject {
     private static final Logger LOG = LogManager.getLogger(Tablet.class);
     // if current version count of replica is mor than
     // QUERYABLE_TIMES_OF_MIN_VERSION_COUNT times the minimum version count,
@@ -82,21 +82,21 @@ public class Tablet extends MetaObject implements Writable {
     }
 
     @SerializedName(value = "id")
-    private long id;
-    @SerializedName(value = "replicas")
-    private List<Replica> replicas;
-    @SerializedName(value = "checkedVersion")
+    protected long id;
+    @SerializedName(value = "rs", alternate = {"replicas"})
+    protected List<Replica> replicas;
+    @SerializedName(value = "cv", alternate = {"checkedVersion"})
     private long checkedVersion;
     @Deprecated
-    @SerializedName(value = "checkedVersionHash")
+    @SerializedName(value = "cvs", alternate = {"checkedVersionHash"})
     private long checkedVersionHash;
-    @SerializedName(value = "isConsistent")
+    @SerializedName(value = "ic", alternate = {"isConsistent"})
     private boolean isConsistent;
 
     // cooldown conf
-    @SerializedName(value = "cooldownReplicaId")
+    @SerializedName(value = "cri", alternate = {"cooldownReplicaId"})
     private long cooldownReplicaId = -1;
-    @SerializedName(value = "cooldownTerm")
+    @SerializedName(value = "ctm", alternate = {"cooldownTerm"})
     private long cooldownTerm = -1;
     private ReentrantReadWriteLock cooldownConfLock = new ReentrantReadWriteLock();
 
@@ -112,7 +112,7 @@ public class Tablet extends MetaObject implements Writable {
         this(tabletId, new ArrayList<>());
     }
 
-    public Tablet(long tabletId, List<Replica> replicas) {
+    private Tablet(long tabletId, List<Replica> replicas) {
         this.id = tabletId;
         this.replicas = replicas;
         if (this.replicas == null) {
@@ -168,13 +168,14 @@ public class Tablet extends MetaObject implements Writable {
         }
     }
 
-    private boolean deleteRedundantReplica(long backendId, long version) {
+    protected boolean isLatestReplicaAndDeleteOld(Replica newReplica) {
         boolean delete = false;
         boolean hasBackend = false;
+        long version = newReplica.getVersion();
         Iterator<Replica> iterator = replicas.iterator();
         while (iterator.hasNext()) {
             Replica replica = iterator.next();
-            if (replica.getBackendId() == backendId) {
+            if (replica.getBackendId() == newReplica.getBackendId()) {
                 hasBackend = true;
                 if (replica.getVersion() <= version) {
                     iterator.remove();
@@ -187,7 +188,7 @@ public class Tablet extends MetaObject implements Writable {
     }
 
     public void addReplica(Replica replica, boolean isRestore) {
-        if (deleteRedundantReplica(replica.getBackendId(), replica.getVersion())) {
+        if (isLatestReplicaAndDeleteOld(replica)) {
             replicas.add(replica);
             if (!isRestore) {
                 Env.getCurrentInvertedIndex().addReplica(id, replica);
@@ -212,16 +213,26 @@ public class Tablet extends MetaObject implements Writable {
     }
 
     public List<Long> getNormalReplicaBackendIds() {
-        return Lists.newArrayList(getNormalReplicaBackendPathMap().keySet());
+        try {
+            return Lists.newArrayList(getNormalReplicaBackendPathMap().keySet());
+        } catch (Exception e) {
+            LOG.warn("failed to getNormalReplicaBackendIds", e);
+            return Lists.newArrayList();
+        }
     }
 
-    // return map of (BE id -> path hash) of normal replicas
-    // for load plan.
-    public Multimap<Long, Long> getNormalReplicaBackendPathMap() {
+    @FunctionalInterface
+    interface BackendIdGetter {
+        long get(Replica rep, String be);
+    }
+
+    private Multimap<Long, Long> getNormalReplicaBackendPathMapImpl(String beEndpoint, BackendIdGetter idGetter)
+            throws UserException {
         Multimap<Long, Long> map = HashMultimap.create();
         SystemInfoService infoService = Env.getCurrentSystemInfo();
         for (Replica replica : replicas) {
-            if (!infoService.checkBackendAlive(replica.getBackendId())) {
+            long backendId = idGetter.get(replica, beEndpoint);
+            if (!infoService.checkBackendAlive(backendId)) {
                 continue;
             }
 
@@ -231,11 +242,25 @@ public class Tablet extends MetaObject implements Writable {
 
             ReplicaState state = replica.getState();
             if (state.canLoad()
-                    || (state == ReplicaState.DECOMMISSION && replica.getPostWatermarkTxnId() < 0)) {
-                map.put(replica.getBackendId(), replica.getPathHash());
+                    || (state == ReplicaState.DECOMMISSION
+                            && replica.getPostWatermarkTxnId() < 0
+                            && replica.getLastFailedVersion() < 0)) {
+                map.put(backendId, replica.getPathHash());
             }
         }
         return map;
+    }
+
+    // return map of (BE id -> path hash) of normal replicas
+    // for load plan.
+    public Multimap<Long, Long> getNormalReplicaBackendPathMap() throws UserException {
+        return getNormalReplicaBackendPathMapImpl(null, (rep, be) -> rep.getBackendId());
+    }
+
+    // for cloud mode without ConnectContext. use BE IP to find replica
+    protected Multimap<Long, Long> getNormalReplicaBackendPathMapCloud(String beEndpoint) throws UserException {
+        return getNormalReplicaBackendPathMapImpl(beEndpoint,
+                (rep, be) -> ((CloudReplica) rep).getBackendId(be));
     }
 
     // for query
@@ -269,16 +294,16 @@ public class Tablet extends MetaObject implements Writable {
         }
 
         if (Config.skip_compaction_slower_replica && allQueryableReplica.size() > 1) {
-            long minVersionCount = Long.MAX_VALUE;
-            for (Replica replica : allQueryableReplica) {
-                if (replica.getVersionCount() != -1 && replica.getVersionCount() < minVersionCount) {
-                    minVersionCount = replica.getVersionCount();
-                }
+            long minVersionCount = allQueryableReplica.stream().mapToLong(Replica::getVisibleVersionCount)
+                    .filter(count -> count != -1).min().orElse(Long.MAX_VALUE);
+            long maxVersionCount = Config.min_version_count_indicate_replica_compaction_too_slow;
+            if (minVersionCount != Long.MAX_VALUE) {
+                maxVersionCount = Math.max(maxVersionCount, minVersionCount * QUERYABLE_TIMES_OF_MIN_VERSION_COUNT);
             }
-            final long finalMinVersionCount = minVersionCount;
-            return allQueryableReplica.stream().filter(replica -> replica.getVersionCount() == -1
-                            || replica.getVersionCount() < Config.min_version_count_indicate_replica_compaction_too_slow
-                            || replica.getVersionCount() < finalMinVersionCount * QUERYABLE_TIMES_OF_MIN_VERSION_COUNT)
+
+            final long finalMaxVersionCount = maxVersionCount;
+            return allQueryableReplica.stream()
+                    .filter(replica -> replica.getVisibleVersionCount() < finalMaxVersionCount)
                     .collect(Collectors.toList());
         }
         return allQueryableReplica;
@@ -369,12 +394,7 @@ public class Tablet extends MetaObject implements Writable {
         return "tabletId=" + this.id;
     }
 
-    @Override
-    public void write(DataOutput out) throws IOException {
-        String json = GsonUtils.GSON.toJson(this);
-        Text.writeString(out, json);
-    }
-
+    @Deprecated
     @Override
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
@@ -383,7 +403,7 @@ public class Tablet extends MetaObject implements Writable {
         int replicaCount = in.readInt();
         for (int i = 0; i < replicaCount; ++i) {
             Replica replica = Replica.read(in);
-            if (deleteRedundantReplica(replica.getBackendId(), replica.getVersion())) {
+            if (isLatestReplicaAndDeleteOld(replica)) {
                 replicas.add(replica);
             }
         }
@@ -393,13 +413,14 @@ public class Tablet extends MetaObject implements Writable {
         isConsistent = in.readBoolean();
     }
 
+    @Deprecated
     public static Tablet read(DataInput in) throws IOException {
         if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_115) {
             String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, Tablet.class);
+            return GsonUtils.GSON.fromJson(json, EnvFactory.getInstance().getTabletClass());
         }
 
-        Tablet tablet = new Tablet();
+        Tablet tablet = EnvFactory.getInstance().createTablet();
         tablet.readFields(in);
         return tablet;
     }
@@ -498,7 +519,7 @@ public class Tablet extends MetaObject implements Writable {
                 aliveAndVersionComplete++;
             }
 
-            if (backend.isScheduleAvailable()) {
+            if (replica.isScheduleAvailable()) {
                 if (replica.needFurtherRepair() && (needFurtherRepairReplica == null || !versionCompleted)) {
                     needFurtherRepairReplica = replica;
                 }
@@ -508,7 +529,7 @@ public class Tablet extends MetaObject implements Writable {
 
                 if (versionCompleted) {
                     stable++;
-                    versions.add(replica.getVersionCount());
+                    versions.add(replica.getVisibleVersionCount());
 
                     allocNum = stableVersionCompleteAllocMap.getOrDefault(backend.getLocationTag(), (short) 0);
                     stableVersionCompleteAllocMap.put(backend.getLocationTag(), (short) (allocNum + 1));
@@ -599,7 +620,7 @@ public class Tablet extends MetaObject implements Writable {
             // get the max version diff
             long delta = versions.get(versions.size() - 1) - versions.get(0);
             double ratio = (double) delta / versions.get(versions.size() - 1);
-            if (versions.get(versions.size() - 1) > Config.min_version_count_indicate_replica_compaction_too_slow
+            if (versions.get(versions.size() - 1) >= Config.min_version_count_indicate_replica_compaction_too_slow
                     && ratio > Config.valid_version_count_delta_ratio_between_replicas) {
                 return Pair.of(TabletStatus.REPLICA_COMPACTION_TOO_SLOW, Priority.HIGH);
             }
@@ -692,6 +713,10 @@ public class Tablet extends MetaObject implements Writable {
      * LOW:     delay Config.tablet_repair_delay_factor_second * 3;
      */
     public boolean readyToBeRepaired(SystemInfoService infoService, TabletSchedCtx.Priority priority) {
+        if (FeConstants.runningUnitTest) {
+            return true;
+        }
+
         if (priority == Priority.VERY_HIGH) {
             return true;
         }

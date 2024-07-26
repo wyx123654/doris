@@ -165,7 +165,7 @@ void serialize_and_deserialize_test(segment_v2::CompressionTypePB compression_ty
                               decimal_column.get())
                              ->get_data();
         for (int i = 0; i < 1024; ++i) {
-            __int128_t value = i * pow(10, 9) + i * pow(10, 8);
+            __int128_t value = __int128_t(i * pow(10, 9) + i * pow(10, 8));
             data.push_back(value);
         }
         vectorized::ColumnWithTypeAndName type_and_name(decimal_column->get_ptr(),
@@ -187,7 +187,7 @@ void serialize_and_deserialize_test(segment_v2::CompressionTypePB compression_ty
         vectorized::DataTypePtr bitmap_data_type(std::make_shared<vectorized::DataTypeBitMap>());
         auto bitmap_column = bitmap_data_type->create_column();
         std::vector<BitmapValue>& container =
-                ((vectorized::ColumnComplexType<BitmapValue>*)bitmap_column.get())->get_data();
+                ((vectorized::ColumnBitmap*)bitmap_column.get())->get_data();
         for (int i = 0; i < 1024; ++i) {
             BitmapValue bv;
             for (int j = 0; j <= i; ++j) {
@@ -322,7 +322,7 @@ TEST(BlockTest, dump_data) {
                                   decimal_column.get())
                                  ->get_data();
     for (int i = 0; i < 1024; ++i) {
-        __int128_t value = i * pow(10, 9) + i * pow(10, 8);
+        __int128_t value = __int128_t(i * pow(10, 9) + i * pow(10, 8));
         decimal_data.push_back(value);
     }
     vectorized::ColumnWithTypeAndName test_decimal(decimal_column->get_ptr(), decimal_data_type,

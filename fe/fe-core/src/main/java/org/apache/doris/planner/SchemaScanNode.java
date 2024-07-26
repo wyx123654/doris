@@ -23,7 +23,7 @@ import org.apache.doris.catalog.SchemaTable;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.Util;
-import org.apache.doris.planner.external.FederationBackendPolicy;
+import org.apache.doris.datasource.FederationBackendPolicy;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.statistics.StatisticalType;
@@ -60,6 +60,18 @@ public class SchemaScanNode extends ScanNode {
     public SchemaScanNode(PlanNodeId id, TupleDescriptor desc) {
         super(id, desc, "SCAN SCHEMA", StatisticalType.SCHEMA_SCAN_NODE);
         this.tableName = desc.getTable().getName();
+    }
+
+    public String getTableName() {
+        return tableName;
+    }
+
+    public String getSchemaDb() {
+        return desc.getTable().getDatabase().getFullName();
+    }
+
+    public String getSchemaCatalog() {
+        return desc.getTable().getDatabase().getCatalog().getName();
     }
 
     @Override

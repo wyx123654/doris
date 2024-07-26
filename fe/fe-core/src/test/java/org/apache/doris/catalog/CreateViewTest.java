@@ -45,6 +45,7 @@ public class CreateViewTest {
         UtFrameUtils.createDorisCluster(runningDir);
         // create connect context
         connectContext = UtFrameUtils.createDefaultCtx();
+        connectContext.getSessionVariable().setDisableNereidsRules("PRUNE_EMPTY_PARTITION");
         // create database
         String createDbStmtStr = "create database test;";
         CreateDbStmt createDbStmt = (CreateDbStmt) UtFrameUtils.parseAndAnalyzeStmt(createDbStmtStr, connectContext);
@@ -185,7 +186,7 @@ public class CreateViewTest {
         alter1 = (View) db.getTableOrDdlException("alter1");
         Assert.assertEquals(
                 "WITH test1_cte(w1, w2) AS (SELECT `k1`, `k2` FROM `test`.`tbl1`) "
-                        + "SELECT `w1` AS `c1`, sum(`w2`) AS `c2` FROM `test1_cte` WHERE `w1` > 10 GROUP BY `w1` "
+                        + "SELECT `w1` AS `c1`, sum(`w2`) AS `c2` FROM `test1_cte` WHERE (`w1` > 10) GROUP BY `w1` "
                         + "ORDER BY `w1` ASC NULLS FIRST",
                 alter1.getInlineViewDef());
     }

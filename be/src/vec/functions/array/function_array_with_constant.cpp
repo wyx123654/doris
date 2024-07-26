@@ -91,9 +91,9 @@ public:
         array_sizes.reserve(input_rows_count);
         for (size_t i = 0; i < input_rows_count; ++i) {
             auto array_size = num->get_int(i);
-            if (UNLIKELY(array_size < 0)) {
-                return Status::RuntimeError("Array size can not be negative in function:" +
-                                            get_name());
+            if (UNLIKELY(array_size < 0) || UNLIKELY(array_size > max_array_size_as_field)) {
+                return Status::RuntimeError("Array size should in range(0, {}) in function: {}",
+                                            max_array_size_as_field, get_name());
             }
             offset += array_size;
             offsets.push_back(offset);
@@ -101,8 +101,8 @@ public:
         }
         auto clone = value->clone_empty();
         clone->reserve(input_rows_count);
-        RETURN_IF_CATCH_EXCEPTION(
-                value->replicate(array_sizes.data(), offset, *clone->assume_mutable().get()));
+        clone->assume_mutable()->insert_indices_from(*value, array_sizes.data(),
+                                                     array_sizes.data() + offset);
         if (!clone->is_nullable()) {
             clone = ColumnNullable::create(std::move(clone), ColumnUInt8::create(clone->size(), 0));
         }

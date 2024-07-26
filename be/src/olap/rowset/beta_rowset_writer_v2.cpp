@@ -58,7 +58,7 @@ namespace doris {
 using namespace ErrorCode;
 
 BetaRowsetWriterV2::BetaRowsetWriterV2(const std::vector<std::shared_ptr<LoadStreamStub>>& streams)
-        : _streams(streams) {}
+        : _segment_creator(_context, _seg_files), _streams(streams) {}
 
 BetaRowsetWriterV2::~BetaRowsetWriterV2() = default;
 
@@ -66,18 +66,17 @@ Status BetaRowsetWriterV2::init(const RowsetWriterContext& rowset_writer_context
     _context = rowset_writer_context;
     _context.segment_collector = std::make_shared<SegmentCollectorT<BetaRowsetWriterV2>>(this);
     _context.file_writer_creator = std::make_shared<FileWriterCreatorT<BetaRowsetWriterV2>>(this);
-    RETURN_IF_ERROR(_segment_creator.init(_context));
     return Status::OK();
 }
 
-Status BetaRowsetWriterV2::create_file_writer(uint32_t segment_id, io::FileWriterPtr& file_writer) {
+Status BetaRowsetWriterV2::create_file_writer(uint32_t segment_id, io::FileWriterPtr& file_writer,
+                                              FileType file_type) {
     auto partition_id = _context.partition_id;
     auto index_id = _context.index_id;
     auto tablet_id = _context.tablet_id;
     auto load_id = _context.load_id;
-
     auto stream_writer = std::make_unique<io::StreamSinkFileWriter>(_streams);
-    stream_writer->init(load_id, partition_id, index_id, tablet_id, segment_id);
+    stream_writer->init(load_id, partition_id, index_id, tablet_id, segment_id, file_type);
     file_writer = std::move(stream_writer);
     return Status::OK();
 }

@@ -45,9 +45,9 @@ public class DeleteStmtTest {
 
     @Before
     public void setUp() {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
         MockedAuth.mockedAccess(accessManager);
         MockedAuth.mockedConnectContext(ctx, "root", "192.168.1.1");
+        analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
     }
 
     @Test
@@ -60,11 +60,11 @@ public class DeleteStmtTest {
         Assert.assertEquals("testDb", deleteStmt.getDbName());
         Assert.assertEquals("testTbl", deleteStmt.getTableName());
         Assert.assertEquals(Lists.newArrayList("partition"), deleteStmt.getPartitionNames());
-        Assert.assertEquals("DELETE FROM `testDb`.`testTbl` PARTITION (partition) WHERE `k1` = 'abc'",
+        Assert.assertEquals("DELETE FROM `testDb`.`testTbl` PARTITION (partition) WHERE (`k1` = 'abc')",
                             deleteStmt.toSql());
 
         deleteStmt = new DeleteStmt(new TableName(internalCtl, "testDb", "testTbl"), null, wherePredicate);
-        Assert.assertEquals("DELETE FROM `testDb`.`testTbl` WHERE `k1` = 'abc'",
+        Assert.assertEquals("DELETE FROM `testDb`.`testTbl` WHERE (`k1` = 'abc')",
                 deleteStmt.toSql());
     }
 

@@ -39,30 +39,40 @@ suite ("test_alter_table_property") {
 
     def queryReplicaCount = { partitionName ->
         def result = sql "SHOW REPLICA DISTRIBUTION FROM ${tableName} PARTITION ${partitionName}"
+        logger.info("${result}")
         int sum = 0
         for (row in result) {
             sum += row[1].toInteger()
         }
         sum
     }
+    def replication_num = 1
+    def forceReplicaNum = getFeConfig('force_olap_table_replication_num').toInteger()
+    if (forceReplicaNum > 0) {
+        replication_num = forceReplicaNum
+    }
 
-    assertEquals(1, queryReplicaCount("p1"))
+    assertEquals(replication_num, queryReplicaCount("p1"))
 
     sql """ ALTER TABLE ${tableName} ADD PARTITION p2 VALUES LESS THAN ("200") """
-    assertEquals(1, queryReplicaCount("p2"))
+    assertEquals(replication_num, queryReplicaCount("p2"))
 
-    sql """ ALTER TABLE ${tableName} SET ( "default.replication_allocation" = "tag.location.default: 2" ) """
+    if (!isCloudMode()) {
+        sql """ ALTER TABLE ${tableName} SET ( "default.replication_allocation" = "tag.location.default: 2" ) """
+    }
     sql """ ALTER TABLE ${tableName} ADD PARTITION p3 VALUES LESS THAN ("300") """
     assertEquals(2, queryReplicaCount("p3"))
 
-    sql """ ALTER TABLE ${tableName} MODIFY PARTITION p1 SET ( "replication_allocation" = "tag.location.default: 2" ) """
-    for (i = 0; i < 300; i++) {
-        if (queryReplicaCount("p1") != 2) {
-            Thread.sleep(3000)
+    if (!isCloudMode()) {
+        sql """ ALTER TABLE ${tableName} MODIFY PARTITION p1 SET ( "replication_allocation" = "tag.location.default: 2" ) """
+        for (i = 0; i < 300; i++) {
+            if (queryReplicaCount("p1") != 2) {
+                Thread.sleep(3000)
+            }
         }
+        assertEquals(2, queryReplicaCount("p1"))
     }
-    assertEquals(2, queryReplicaCount("p1"))
-    assertEquals(1, queryReplicaCount("p2"))
+    assertEquals(replication_num, queryReplicaCount("p2"))
 
     sql "DROP TABLE ${tableName}"
 }

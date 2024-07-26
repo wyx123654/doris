@@ -62,25 +62,23 @@ class Block;
 // Writer for a particular (load, index, tablet).
 // This class is NOT thread-safe, external synchronization is required.
 class DeltaWriterV2 {
+    ENABLE_FACTORY_CREATOR(DeltaWriterV2);
+
 public:
-    static std::unique_ptr<DeltaWriterV2> open(
-            WriteRequest* req, const std::vector<std::shared_ptr<LoadStreamStub>>& streams,
-            RuntimeState* state);
+    DeltaWriterV2(WriteRequest* req, const std::vector<std::shared_ptr<LoadStreamStub>>& streams,
+                  RuntimeState* state);
 
     ~DeltaWriterV2();
 
     Status init();
 
-    Status write(const vectorized::Block* block, const std::vector<uint32_t>& row_idxs,
-                 bool is_append = false);
-
-    Status append(const vectorized::Block* block);
+    Status write(const vectorized::Block* block, const std::vector<uint32_t>& row_idxs);
 
     // flush the last memtable to flush queue, must call it before close_wait()
     Status close();
     // wait for all memtables to be flushed.
     // mem_consumption() should be 0 after this function returns.
-    Status close_wait(RuntimeProfile* profile = nullptr);
+    Status close_wait(int32_t& num_segments, RuntimeProfile* profile = nullptr);
 
     // abandon current memtable and wait for all pending-flushing memtables to be destructed.
     // mem_consumption() should be 0 after this function returns.
@@ -88,9 +86,6 @@ public:
     Status cancel_with_status(const Status& st);
 
 private:
-    DeltaWriterV2(WriteRequest* req, const std::vector<std::shared_ptr<LoadStreamStub>>& streams,
-                  StorageEngine* storage_engine, RuntimeState* state);
-
     void _build_current_tablet_schema(int64_t index_id,
                                       const OlapTableSchemaParam* table_schema_param,
                                       const TabletSchema& ori_tablet_schema);

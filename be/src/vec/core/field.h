@@ -58,7 +58,7 @@ namespace doris::vectorized {
 
 template <typename T>
 struct NearestFieldTypeImpl {
-    using Type = T;
+    using Type = T; // for HLL or some origin types. see def. of storage
 };
 
 template <typename T>
@@ -217,29 +217,37 @@ public:
 
     bool operator<(const JsonbField& r) const {
         LOG(FATAL) << "comparing between JsonbField is not supported";
+        __builtin_unreachable();
     }
     bool operator<=(const JsonbField& r) const {
         LOG(FATAL) << "comparing between JsonbField is not supported";
+        __builtin_unreachable();
     }
     bool operator==(const JsonbField& r) const {
         LOG(FATAL) << "comparing between JsonbField is not supported";
+        __builtin_unreachable();
     }
     bool operator>(const JsonbField& r) const {
         LOG(FATAL) << "comparing between JsonbField is not supported";
+        __builtin_unreachable();
     }
     bool operator>=(const JsonbField& r) const {
         LOG(FATAL) << "comparing between JsonbField is not supported";
+        __builtin_unreachable();
     }
     bool operator!=(const JsonbField& r) const {
         LOG(FATAL) << "comparing between JsonbField is not supported";
+        __builtin_unreachable();
     }
 
     const JsonbField& operator+=(const JsonbField& r) {
         LOG(FATAL) << "Not support plus opration on JsonbField";
+        __builtin_unreachable();
     }
 
     const JsonbField& operator-=(const JsonbField& r) {
         LOG(FATAL) << "Not support minus opration on JsonbField";
+        __builtin_unreachable();
     }
 
 private:
@@ -298,6 +306,7 @@ public:
     const DecimalField<T>& operator+=(const DecimalField<T>& r) {
         if (scale != r.get_scale()) {
             LOG(FATAL) << "Add different decimal fields";
+            __builtin_unreachable();
         }
         dec += r.get_value();
         return *this;
@@ -306,6 +315,7 @@ public:
     const DecimalField<T>& operator-=(const DecimalField<T>& r) {
         if (scale != r.get_scale()) {
             LOG(FATAL) << "Sub different decimal fields";
+            __builtin_unreachable();
         }
         dec -= r.get_value();
         return *this;
@@ -341,6 +351,7 @@ public:
             UInt128 = 4,
             Int128 = 5,
             FixedLengthObject = 6,
+            IPv6 = 7,
 
             /// Non-POD types.
 
@@ -359,7 +370,7 @@ public:
             HyperLogLog = 28,
             QuantileState = 29,
             Int256 = 30,
-            Decimal256 = 31,
+            Decimal256 = 31
         };
 
         static const int MIN_NON_POD = 16;
@@ -408,10 +419,13 @@ public:
                 return "HyperLogLog";
             case QuantileState:
                 return "QuantileState";
+            case IPv6:
+                return "IPv6";
             default:
                 LOG(FATAL) << "type not supported, type=" << Types::to_string(which);
                 break;
             }
+            __builtin_unreachable();
         }
     };
 
@@ -477,6 +491,11 @@ public:
                 assign(rhs); /// This assigns string or vector without deallocation of existing buffer.
         }
         return *this;
+    }
+
+    bool is_complex_field() const {
+        return which == Types::Array || which == Types::Map || which == Types::Tuple ||
+               which == Types::VariantMap;
     }
 
     Field& operator=(Field&& rhs) {
@@ -580,6 +599,8 @@ public:
             return get<Int64>() <=> rhs.get<Int64>();
         case Types::Int128:
             return get<Int128>() <=> rhs.get<Int128>();
+        case Types::IPv6:
+            return get<IPv6>() <=> rhs.get<IPv6>();
         case Types::Float64:
             return get<Float64>() < rhs.get<Float64>()    ? std::strong_ordering::less
                    : get<Float64>() == rhs.get<Float64>() ? std::strong_ordering::equal
@@ -621,6 +642,9 @@ public:
             return;
         case Types::Int128:
             f(field.template get<Int128>());
+            return;
+        case Types::IPv6:
+            f(field.template get<IPv6>());
             return;
         case Types::Float64:
             f(field.template get<Float64>());
@@ -675,7 +699,7 @@ public:
 
 private:
     std::aligned_union_t<DBMS_MIN_FIELD_SIZE - sizeof(Types::Which), Null, UInt64, UInt128, Int64,
-                         Int128, Float64, String, JsonbField, Array, Tuple, Map, VariantMap,
+                         Int128, IPv6, Float64, String, JsonbField, Array, Tuple, Map, VariantMap,
                          DecimalField<Decimal32>, DecimalField<Decimal64>,
                          DecimalField<Decimal128V2>, DecimalField<Decimal128V3>,
                          DecimalField<Decimal256>, BitmapValue, HyperLogLog, QuantileState>
@@ -744,7 +768,9 @@ private:
     }
 
     ALWAYS_INLINE void destroy() {
-        if (which < Types::MIN_NON_POD) return;
+        if (which < Types::MIN_NON_POD) {
+            return;
+        }
 
         switch (which) {
         case Types::String:
@@ -764,6 +790,15 @@ private:
             break;
         case Types::VariantMap:
             destroy<VariantMap>();
+            break;
+        case Types::Bitmap:
+            destroy<BitmapValue>();
+            break;
+        case Types::HyperLogLog:
+            destroy<HyperLogLog>();
+            break;
+        case Types::QuantileState:
+            destroy<QuantileState>();
             break;
         default:
             break;
@@ -833,6 +868,10 @@ struct Field::TypeToEnum<wide::Int256> {
 template <>
 struct Field::TypeToEnum<Float64> {
     static constexpr Types::Which value = Types::Float64;
+};
+template <>
+struct Field::TypeToEnum<IPv6> {
+    static constexpr Types::Which value = Types::IPv6;
 };
 template <>
 struct Field::TypeToEnum<String> {
@@ -917,6 +956,10 @@ struct Field::EnumToType<Field::Types::Int128> {
 template <>
 struct Field::EnumToType<Field::Types::Float64> {
     using Type = Float64;
+};
+template <>
+struct Field::EnumToType<Field::Types::IPv6> {
+    using Type = IPv6;
 };
 template <>
 struct Field::EnumToType<Field::Types::String> {

@@ -36,7 +36,7 @@ public class JobExecutionConfigurationTest {
         configuration.setTimerDefinition(timerDefinition);
 
         List<Long> delayTimes = configuration.getTriggerDelayTimes(
-                0L, 0L,  5000L);
+                0L, 0L, 5000L);
 
         Assertions.assertEquals(1, delayTimes.size());
         Assertions.assertEquals(1, delayTimes.get(0).longValue());
@@ -59,12 +59,26 @@ public class JobExecutionConfigurationTest {
         Assertions.assertEquals(2, delayTimes.size());
         Assertions.assertArrayEquals(new Long[]{100L, 700L}, delayTimes.toArray());
         delayTimes = configuration.getTriggerDelayTimes(
-                   200000L, 0L, 1100000L);
+                200000L, 0L, 1100000L);
         Assertions.assertEquals(1, delayTimes.size());
-        Assertions.assertArrayEquals(new Long[]{ 500L}, delayTimes.toArray());
+        Assertions.assertArrayEquals(new Long[]{500L}, delayTimes.toArray());
         delayTimes = configuration.getTriggerDelayTimes(
                 1001000L, 0L, 1000000L);
         Assertions.assertEquals(1, delayTimes.size());
+        timerDefinition.setStartTimeMs(2000L);
+        timerDefinition.setIntervalUnit(IntervalUnit.SECOND);
+        Assertions.assertArrayEquals(new Long[]{2L, 12L}, configuration.getTriggerDelayTimes(100000L, 100000L, 120000L).toArray());
+    }
+
+    @Test
+    public void testImmediate() {
+        JobExecutionConfiguration configuration = new JobExecutionConfiguration();
+        configuration.setExecuteType(JobExecuteType.ONE_TIME);
+        configuration.setImmediate(true);
+        TimerDefinition timerDefinition = new TimerDefinition();
+        timerDefinition.setStartTimeMs(0L);
+        configuration.setTimerDefinition(timerDefinition);
+        configuration.checkParams();
     }
 
 }

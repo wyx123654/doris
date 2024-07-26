@@ -17,7 +17,8 @@
 
 import org.codehaus.groovy.runtime.IOGroovyMethods
 
-suite("test_index_compaction_with_multi_index_segments", "p0") {
+suite("test_index_compaction_with_multi_index_segments", "nonConcurrent") {
+    def isCloudMode = isCloudMode()
     def tableName = "test_index_compaction_with_multi_index_segments"
     def backendId_to_backendIP = [:]
     def backendId_to_backendHttpPort = [:]
@@ -32,10 +33,10 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
         }
     }
 
-    def trigger_full_compaction_on_tablets = { String[][] tablets ->
-        for (String[] tablet : tablets) {
-            String tablet_id = tablet[0]
-            String backend_id = tablet[2]
+    def trigger_full_compaction_on_tablets = { tablets ->
+        for (def tablet : tablets) {
+            String tablet_id = tablet.TabletId
+            String backend_id = tablet.BackendId
             int times = 1
 
             String compactionStatus;
@@ -58,13 +59,13 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
         }
     }
 
-    def wait_full_compaction_done = { String[][] tablets ->
-        for (String[] tablet in tablets) {
+    def wait_full_compaction_done = { tablets ->
+        for (def tablet in tablets) {
             boolean running = true
             do {
                 Thread.sleep(1000)
-                String tablet_id = tablet[0]
-                String backend_id = tablet[2]
+                String tablet_id = tablet.TabletId
+                String backend_id = tablet.BackendId
                 def (code, out, err) = be_get_compaction_status(backendId_to_backendIP.get(backend_id), backendId_to_backendHttpPort.get(backend_id), tablet_id)
                 logger.info("Get compaction status: code=" + code + ", out=" + out + ", err=" + err)
                 assertEquals(code, 0)
@@ -75,11 +76,10 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
         }
     }
 
-    def get_rowset_count = {String[][] tablets ->
+    def get_rowset_count = { tablets ->
         int rowsetCount = 0
-        for (String[] tablet in tablets) {
-            def compactionStatusUrlIndex = 18
-            def (code, out, err) = curl("GET", tablet[compactionStatusUrlIndex])
+        for (def tablet in tablets) {
+            def (code, out, err) = curl("GET", tablet.CompactionStatus)
             logger.info("Show tablets status: code=" + code + ", out=" + out + ", err=" + err)
             assertEquals(code, 0)
             def tabletJson = parseJson(out.trim())
@@ -145,7 +145,7 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
         * 4. insert 10 rows, again
         * 5. full compaction
         */
-        table_name = "test_index_compaction_with_multi_index_segments_dups"
+        tableName = "test_index_compaction_with_multi_index_segments_dups"
         sql """ DROP TABLE IF EXISTS ${tableName}; """
         sql """
             CREATE TABLE ${tableName} (
@@ -193,9 +193,17 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
         qt_sql """ select * from ${tableName} where comment_id < 8 order by file_time, comment_id, body """
 
         //TabletId,ReplicaId,BackendId,SchemaHash,Version,LstSuccessVersion,LstFailedVersion,LstFailedTime,LocalDataSize,RemoteDataSize,RowCount,State,LstConsistencyCheckTime,CheckVersion,VersionCount,PathHash,MetaUrl,CompactionStatus
-        String[][] tablets = sql """ show tablets from ${tableName}; """
+        def tablets = sql_return_maparray """ show tablets from ${tableName}; """
+        def dedup_tablets = deduplicate_tablets(tablets)
 
-        int replicaNum = 1
+        // In the p0 testing environment, there are no expected operations such as scaling down BE (backend) services
+        // if tablets or dedup_tablets is empty, exception is thrown, and case fail
+        int replicaNum = Math.floor(tablets.size() / dedup_tablets.size())
+        if (replicaNum != 1 && replicaNum != 3)
+        {
+            assert(false);
+        }
+
         // before full compaction, there are 3 rowsets.
         int rowsetCount = get_rowset_count.call(tablets)
         assert (rowsetCount == 3 * replicaNum)
@@ -208,7 +216,11 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
 
         // after full compaction, there is only 1 rowset.
         rowsetCount = get_rowset_count.call(tablets)
-        assert (rowsetCount == 1 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (1 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 1 * replicaNum)
+        }
 
         qt_sql """ select * from ${tableName} order by file_time, comment_id, body """
         qt_sql """ select * from ${tableName} where body match "using" order by file_time, comment_id, body """
@@ -227,12 +239,17 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
                                                 ("2018-02-21 12:00:00", 9, "I\'m using the builds"),
                                                 ("2018-02-21 12:00:00", 10, "I\'m using the builds"); """
 
-        tablets = sql """ show tablets from ${tableName}; """
+        sql """ select * from ${tableName} """
+
+        tablets = sql_return_maparray """ show tablets from ${tableName}; """
 
         // before full compaction, there are 2 rowsets.
         rowsetCount = get_rowset_count.call(tablets)
-        assert (rowsetCount == 2 * replicaNum)
-
+        if (isCloudMode) {
+            assert (rowsetCount == (2 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 2 * replicaNum)
+        }
         // trigger full compactions for all tablets in ${tableName}
         trigger_full_compaction_on_tablets.call(tablets)
 
@@ -241,7 +258,11 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
 
         // after full compaction, there is only 1 rowset.
         rowsetCount = get_rowset_count.call(tablets)
-        assert (rowsetCount == 1 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (1 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 1 * replicaNum)
+        }
 
         qt_sql """ select * from ${tableName} order by file_time, comment_id, body """
         qt_sql """ select * from ${tableName} where body match "using" order by file_time, comment_id, body """
@@ -256,7 +277,7 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
         * 4. insert 10 rows, again
         * 5. full compaction
         */
-        table_name = "test_index_compaction_with_multi_index_segments_unique"
+        tableName = "test_index_compaction_with_multi_index_segments_unique"
         sql """ DROP TABLE IF EXISTS ${tableName}; """
         sql """
             CREATE TABLE ${tableName} (
@@ -305,7 +326,7 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
         qt_sql """ select * from ${tableName} where comment_id < 8 order by file_time, comment_id, body """
 
         //TabletId,ReplicaId,BackendId,SchemaHash,Version,LstSuccessVersion,LstFailedVersion,LstFailedTime,LocalDataSize,RemoteDataSize,RowCount,State,LstConsistencyCheckTime,CheckVersion,VersionCount,PathHash,MetaUrl,CompactionStatus
-        tablets = sql """ show tablets from ${tableName}; """
+        tablets = sql_return_maparray """ show tablets from ${tableName}; """
 
         // before full compaction, there are 3 rowsets.
         rowsetCount = get_rowset_count.call(tablets)
@@ -319,7 +340,11 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
 
         // after full compaction, there is only 1 rowset.
         rowsetCount = get_rowset_count.call(tablets)
-        assert (rowsetCount == 1 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (1 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 1 * replicaNum)
+        }
 
         qt_sql """ select * from ${tableName} order by file_time, comment_id, body """
         qt_sql """ select * from ${tableName} where body match "using" order by file_time, comment_id, body """
@@ -337,13 +362,18 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
                                                 ("2018-02-21 19:00:00", 8, "I\'m using the builds"),
                                                 ("2018-02-21 20:00:00", 9, "I\'m using the builds"),
                                                 ("2018-02-21 21:00:00", 10, "I\'m using the builds"); """
+        
+        sql """ select * from ${tableName} """
 
-        tablets = sql """ show tablets from ${tableName}; """
+        tablets = sql_return_maparray """ show tablets from ${tableName}; """
 
         // before full compaction, there are 2 rowsets.
         rowsetCount = get_rowset_count.call(tablets)
-        assert (rowsetCount == 2 * replicaNum)
-
+        if (isCloudMode) {
+            assert (rowsetCount == (2 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 2 * replicaNum)
+        }
         // trigger full compactions for all tablets in ${tableName}
         trigger_full_compaction_on_tablets.call(tablets)
 
@@ -352,8 +382,11 @@ suite("test_index_compaction_with_multi_index_segments", "p0") {
 
         // after full compaction, there is only 1 rowset.
         rowsetCount = get_rowset_count.call(tablets)
-        assert (rowsetCount == 1 * replicaNum)
-
+        if (isCloudMode) {
+            assert (rowsetCount == (1 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 1 * replicaNum)
+        }
         qt_sql """ select * from ${tableName} order by file_time, comment_id, body """
         qt_sql """ select * from ${tableName} where body match "using" order by file_time, comment_id, body """
         qt_sql """ select * from ${tableName} where body match "the" order by file_time, comment_id, body """

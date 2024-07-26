@@ -18,7 +18,7 @@
 import org.codehaus.groovy.runtime.IOGroovyMethods
 import org.apache.doris.regression.util.Http
 
-suite("test_segcompaction_correctness", "nonConcurrent") {
+suite("test_segcompaction_correctness", "nonConcurrent,p2") {
     def tableName = "segcompaction_correctness_test"
     def create_table_sql = """
                 CREATE TABLE IF NOT EXISTS ${tableName} (
@@ -80,7 +80,8 @@ suite("test_segcompaction_correctness", "nonConcurrent") {
                 "AWS_ACCESS_KEY" = "$ak",
                 "AWS_SECRET_KEY" = "$sk",
                 "AWS_ENDPOINT" = "$endpoint",
-                "AWS_REGION" = "$region"
+                "AWS_REGION" = "$region",
+                "provider" = "${getS3Provider()}"
             )
             properties(
                 "use_new_load_scan_node" = "true"

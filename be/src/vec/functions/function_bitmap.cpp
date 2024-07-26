@@ -132,7 +132,9 @@ struct ToBitmap {
                         continue;
                     }
                 }
-                res_data[i].add(col->get_data()[i]);
+                if (auto value = col->get_data()[i]; value >= 0) {
+                    res_data[i].add(value);
+                }
             }
         }
     }
@@ -280,7 +282,7 @@ struct BitmapFromBase64 {
                 decode_buff.resize(curr_decode_buff_len);
                 last_decode_buff_len = curr_decode_buff_len;
             }
-            int outlen = base64_decode(src_str, src_size, decode_buff.data());
+            auto outlen = base64_decode(src_str, src_size, decode_buff.data());
             if (outlen < 0) {
                 res.emplace_back();
                 null_map[i] = 1;
@@ -700,7 +702,7 @@ Status execute_bitmap_op_count_null_to_zero(
         size_t input_rows_count,
         const std::function<Status(FunctionContext*, Block&, const ColumnNumbers&, size_t, size_t)>&
                 exec_impl_func) {
-    if (get_null_presence(block, arguments)) {
+    if (have_null_column(block, arguments)) {
         auto [temporary_block, new_args, new_result] =
                 create_block_with_nested_columns(block, arguments, result);
         RETURN_IF_ERROR(exec_impl_func(context, temporary_block, new_args, new_result,
@@ -991,7 +993,7 @@ struct BitmapToBase64 {
         for (size_t i = 0; i < size; ++i) {
             BitmapValue& bitmap_val = const_cast<BitmapValue&>(data[i]);
             auto ser_size = bitmap_val.getSizeInBytes();
-            output_char_size += ser_size * (int)(4.0 * ceil((double)ser_size / 3.0));
+            output_char_size += (int)(4.0 * ceil((double)ser_size / 3.0));
         }
         ColumnString::check_chars_length(output_char_size, size);
         chars.resize(output_char_size);
@@ -1010,8 +1012,8 @@ struct BitmapToBase64 {
             }
             bitmap_val.write_to(ser_buff.data());
 
-            int outlen = base64_encode((const unsigned char*)ser_buff.data(), cur_ser_size,
-                                       chars_data + encoded_offset);
+            auto outlen = base64_encode((const unsigned char*)ser_buff.data(), cur_ser_size,
+                                        chars_data + encoded_offset);
             DCHECK(outlen > 0);
 
             encoded_offset += (int)(4.0 * ceil((double)cur_ser_size / 3.0));

@@ -57,9 +57,7 @@ public class JobExecutionConfiguration {
         if (executeType == JobExecuteType.INSTANT || executeType == JobExecuteType.MANUAL) {
             return;
         }
-
-        checkTimerDefinition(immediate);
-
+        checkTimerDefinition();
         if (executeType == JobExecuteType.ONE_TIME) {
             validateStartTimeMs();
             return;
@@ -80,20 +78,23 @@ public class JobExecutionConfiguration {
         }
     }
 
-    private void checkTimerDefinition(boolean immediate) {
+    private void checkTimerDefinition() {
         if (timerDefinition == null) {
             throw new IllegalArgumentException(
                     "timerDefinition cannot be null when executeType is not instant or manual");
         }
-        timerDefinition.checkParams(immediate);
+        timerDefinition.checkParams();
     }
 
     private void validateStartTimeMs() {
         if (timerDefinition.getStartTimeMs() == null) {
             throw new IllegalArgumentException("startTimeMs cannot be null");
         }
+        if (isImmediate()) {
+            return;
+        }
         if (timerDefinition.getStartTimeMs() < System.currentTimeMillis()) {
-            throw new IllegalArgumentException("startTimeMs cannot be less than current time");
+            throw new IllegalArgumentException("startTimeMs must be greater than current time");
         }
     }
 
@@ -137,8 +138,10 @@ public class JobExecutionConfiguration {
             long jobStartTimeMs = timerDefinition.getStartTimeMs();
             if (isImmediate()) {
                 jobStartTimeMs += intervalValue;
+                if (jobStartTimeMs > endTimeMs) {
+                    return delayTimeSeconds;
+                }
             }
-
             return getExecutionDelaySeconds(startTimeMs, endTimeMs, jobStartTimeMs,
                     intervalValue, currentTimeMs);
         }

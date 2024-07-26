@@ -29,10 +29,10 @@ import org.apache.doris.nereids.trees.expressions.functions.table.Jobs;
 import org.apache.doris.nereids.trees.expressions.functions.table.Local;
 import org.apache.doris.nereids.trees.expressions.functions.table.MvInfos;
 import org.apache.doris.nereids.trees.expressions.functions.table.Numbers;
-import org.apache.doris.nereids.trees.expressions.functions.table.Queries;
+import org.apache.doris.nereids.trees.expressions.functions.table.Partitions;
+import org.apache.doris.nereids.trees.expressions.functions.table.Query;
 import org.apache.doris.nereids.trees.expressions.functions.table.S3;
 import org.apache.doris.nereids.trees.expressions.functions.table.Tasks;
-import org.apache.doris.nereids.trees.expressions.functions.table.WorkloadGroups;
 
 import com.google.common.collect.ImmutableList;
 
@@ -54,12 +54,12 @@ public class BuiltinTableValuedFunctions implements FunctionHelper {
             tableValued(Hdfs.class, "hdfs"),
             tableValued(HttpStream.class, "http_stream"),
             tableValued(Numbers.class, "numbers"),
-            tableValued(Queries.class, "queries"),
             tableValued(S3.class, "s3"),
             tableValued(MvInfos.class, "mv_infos"),
+            tableValued(Partitions.class, "partitions"),
             tableValued(Jobs.class, "jobs"),
             tableValued(Tasks.class, "tasks"),
-            tableValued(WorkloadGroups.class, "workload_groups")
+            tableValued(Query.class, "query")
     );
 
     public static final BuiltinTableValuedFunctions INSTANCE = new BuiltinTableValuedFunctions();
@@ -67,4 +67,3 @@ public class BuiltinTableValuedFunctions implements FunctionHelper {
     // Note: Do not add any code here!
     private BuiltinTableValuedFunctions() {}
 }
-

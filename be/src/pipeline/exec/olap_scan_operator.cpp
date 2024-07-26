@@ -21,13 +21,16 @@
 
 #include <memory>
 
+#include "cloud/cloud_meta_mgr.h"
+#include "cloud/cloud_tablet.h"
+#include "cloud/config.h"
 #include "olap/parallel_scanner_builder.h"
 #include "olap/storage_engine.h"
 #include "olap/tablet_manager.h"
+#include "pipeline/common/runtime_filter_consumer.h"
 #include "pipeline/exec/scan_operator.h"
 #include "service/backend_options.h"
 #include "util/to_string.h"
-#include "vec/exec/runtime_filter_consumer.h"
 #include "vec/exec/scan/new_olap_scanner.h"
 #include "vec/exec/scan/vscan_node.h"
 #include "vec/exprs/vcompound_pred.h"
@@ -56,6 +59,8 @@ Status OlapScanLocalState::_init_profile() {
     _block_load_timer = ADD_TIMER(_segment_profile, "BlockLoadTime");
     _block_load_counter = ADD_COUNTER(_segment_profile, "BlocksLoad", TUnit::UNIT);
     _block_fetch_timer = ADD_TIMER(_scanner_profile, "BlockFetchTime");
+    _delete_bitmap_get_agg_timer = ADD_TIMER(_scanner_profile, "DeleteBitmapGetAggTime");
+    _sync_rowset_timer = ADD_TIMER(_scanner_profile, "SyncRowsetTime");
     _raw_rows_counter = ADD_COUNTER(_segment_profile, "RawRowsRead", TUnit::UNIT);
     _block_convert_timer = ADD_TIMER(_scanner_profile, "BlockConvertTime");
     _block_init_timer = ADD_TIMER(_segment_profile, "BlockInitTime");
@@ -64,6 +69,8 @@ Status OlapScanLocalState::_init_profile() {
     _block_conditions_filtered_timer = ADD_TIMER(_segment_profile, "BlockConditionsFilteredTime");
     _block_conditions_filtered_bf_timer =
             ADD_TIMER(_segment_profile, "BlockConditionsFilteredBloomFilterTime");
+    _collect_iterator_merge_next_timer = ADD_TIMER(_segment_profile, "CollectIteratorMergeTime");
+    _collect_iterator_normal_next_timer = ADD_TIMER(_segment_profile, "CollectIteratorNormalTime");
     _block_conditions_filtered_zonemap_timer =
             ADD_TIMER(_segment_profile, "BlockConditionsFilteredZonemapTime");
     _block_conditions_filtered_zonemap_rp_timer =
@@ -136,13 +143,14 @@ Status OlapScanLocalState::_init_profile() {
     _filtered_segment_counter = ADD_COUNTER(_segment_profile, "NumSegmentFiltered", TUnit::UNIT);
     _total_segment_counter = ADD_COUNTER(_segment_profile, "NumSegmentTotal", TUnit::UNIT);
     _tablet_counter = ADD_COUNTER(_runtime_profile, "TabletNum", TUnit::UNIT);
+    _key_range_counter = ADD_COUNTER(_runtime_profile, "KeyRangesNum", TUnit::UNIT);
     _runtime_filter_info = ADD_LABEL_COUNTER_WITH_LEVEL(_runtime_profile, "RuntimeFilterInfo", 1);
     return Status::OK();
 }
 
-Status OlapScanLocalState::_process_conjuncts() {
+Status OlapScanLocalState::_process_conjuncts(RuntimeState* state) {
     SCOPED_TIMER(_process_conjunct_timer);
-    RETURN_IF_ERROR(ScanLocalState::_process_conjuncts());
+    RETURN_IF_ERROR(ScanLocalState::_process_conjuncts(state));
     if (ScanLocalState::_eos) {
         return Status::OK();
     }
@@ -166,13 +174,14 @@ bool OlapScanLocalState::_is_key_column(const std::string& key_name) {
     return res != p._olap_scan_node.key_column_name.end();
 }
 
-Status OlapScanLocalState::_should_push_down_function_filter(
-        vectorized::VectorizedFnCall* fn_call, vectorized::VExprContext* expr_ctx,
-        StringRef* constant_str, doris::FunctionContext** fn_ctx,
-        vectorized::VScanNode::PushDownType& pdt) {
+Status OlapScanLocalState::_should_push_down_function_filter(vectorized::VectorizedFnCall* fn_call,
+                                                             vectorized::VExprContext* expr_ctx,
+                                                             StringRef* constant_str,
+                                                             doris::FunctionContext** fn_ctx,
+                                                             PushDownType& pdt) {
     // Now only `like` function filters is supported to push down
     if (fn_call->fn().name.function_name != "like") {
-        pdt = vectorized::VScanNode::PushDownType::UNACCEPTABLE;
+        pdt = PushDownType::UNACCEPTABLE;
         return Status::OK();
     }
 
@@ -188,7 +197,7 @@ Status OlapScanLocalState::_should_push_down_function_filter(
         }
         if (!children[1 - i]->is_constant()) {
             // only handle constant value
-            pdt = vectorized::VScanNode::PushDownType::UNACCEPTABLE;
+            pdt = PushDownType::UNACCEPTABLE;
             return Status::OK();
         } else {
             DCHECK(children[1 - i]->type().is_string_type());
@@ -199,13 +208,13 @@ Status OlapScanLocalState::_should_push_down_function_filter(
                                 const_col_wrapper->column_ptr)) {
                 *constant_str = const_column->get_data_at(0);
             } else {
-                pdt = vectorized::VScanNode::PushDownType::UNACCEPTABLE;
+                pdt = PushDownType::UNACCEPTABLE;
                 return Status::OK();
             }
         }
     }
     *fn_ctx = func_cxt;
-    pdt = vectorized::VScanNode::PushDownType::ACCEPTABLE;
+    pdt = PushDownType::ACCEPTABLE;
     return Status::OK();
 }
 
@@ -260,69 +269,73 @@ Status OlapScanLocalState::_init_scanners(std::list<vectorized::VScannerSPtr>* s
     bool has_cpu_limit = state()->query_options().__isset.resource_limit &&
                          state()->query_options().resource_limit.__isset.cpu_limit;
 
+    std::vector<TabletWithVersion> tablets;
+    tablets.reserve(_scan_ranges.size());
+    for (auto&& scan_range : _scan_ranges) {
+        // TODO(plat1ko): Get cloud tablet in parallel
+        auto tablet = DORIS_TRY(ExecEnv::get_tablet(scan_range->tablet_id));
+        int64_t version = 0;
+        std::from_chars(scan_range->version.data(),
+                        scan_range->version.data() + scan_range->version.size(), version);
+        tablets.emplace_back(std::move(tablet), version);
+    }
+    int64_t duration_ns = 0;
+    if (config::is_cloud_mode()) {
+        SCOPED_RAW_TIMER(&duration_ns);
+        std::vector<std::function<Status()>> tasks;
+        tasks.reserve(_scan_ranges.size());
+        for (auto&& [tablet, version] : tablets) {
+            tasks.emplace_back([tablet, version]() {
+                return std::dynamic_pointer_cast<CloudTablet>(tablet)->sync_rowsets(version);
+            });
+        }
+        RETURN_IF_ERROR(cloud::bthread_fork_join(tasks, 10));
+    }
+    _sync_rowset_timer->update(duration_ns);
+
     if (enable_parallel_scan && !p._should_run_serial && !has_cpu_limit &&
-        p._push_down_agg_type == TPushAggOp::NONE) {
-        std::vector<TabletWithVersion> tablets;
-        bool is_dup_mow_key = true;
-        for (auto&& scan_range : _scan_ranges) {
-            auto tablet = DORIS_TRY(ExecEnv::get_tablet(scan_range->tablet_id));
-            is_dup_mow_key =
-                    tablet->keys_type() == DUP_KEYS || (tablet->keys_type() == UNIQUE_KEYS &&
-                                                        tablet->enable_unique_key_merge_on_write());
-            if (!is_dup_mow_key) {
-                break;
+        p._push_down_agg_type == TPushAggOp::NONE &&
+        (_storage_no_merge() || p._olap_scan_node.is_preaggregation)) {
+        std::vector<OlapScanRange*> key_ranges;
+        for (auto& range : _cond_ranges) {
+            if (range->begin_scan_range.size() == 1 &&
+                range->begin_scan_range.get_value(0) == NEGATIVE_INFINITY) {
+                continue;
             }
-
-            int64_t version = 0;
-            std::from_chars(scan_range->version.data(),
-                            scan_range->version.data() + scan_range->version.size(), version);
-            tablets.emplace_back(
-                    TabletWithVersion {std::dynamic_pointer_cast<Tablet>(tablet), version});
+            key_ranges.emplace_back(range.get());
         }
 
-        if (is_dup_mow_key) {
-            std::vector<OlapScanRange*> key_ranges;
-            for (auto& range : _cond_ranges) {
-                if (range->begin_scan_range.size() == 1 &&
-                    range->begin_scan_range.get_value(0) == NEGATIVE_INFINITY) {
-                    continue;
-                }
-                key_ranges.emplace_back(range.get());
-            }
+        ParallelScannerBuilder scanner_builder(this, tablets, _scanner_profile, key_ranges, state(),
+                                               p._limit, true, p._olap_scan_node.is_preaggregation);
 
-            ParallelScannerBuilder<OlapScanLocalState> scanner_builder(
-                    this, tablets, _scanner_profile, key_ranges, state(), p._limit_per_scanner,
-                    is_dup_mow_key, p._olap_scan_node.is_preaggregation);
+        int max_scanners_count = state()->parallel_scan_max_scanners_count();
 
-            int max_scanners_count = state()->parallel_scan_max_scanners_count();
-
-            // If the `max_scanners_count` was not set,
-            // use `config::doris_scanner_thread_pool_thread_num` as the default value.
-            if (max_scanners_count <= 0) {
-                max_scanners_count = config::doris_scanner_thread_pool_thread_num;
-            }
-
-            // Too small value of `min_rows_per_scanner` is meaningless.
-            auto min_rows_per_scanner =
-                    std::max<int64_t>(1024, state()->parallel_scan_min_rows_per_scanner());
-            scanner_builder.set_max_scanners_count(max_scanners_count);
-            scanner_builder.set_min_rows_per_scanner(min_rows_per_scanner);
-
-            RETURN_IF_ERROR(scanner_builder.build_scanners(*scanners));
-            for (auto& scanner : *scanners) {
-                auto* olap_scanner = assert_cast<vectorized::NewOlapScanner*>(scanner.get());
-                RETURN_IF_ERROR(olap_scanner->prepare(state(), _conjuncts));
-                olap_scanner->set_compound_filters(_compound_filters);
-            }
-            LOG(INFO) << "parallel scanners count: " << scanners->size();
-            return Status::OK();
+        // If the `max_scanners_count` was not set,
+        // use `config::doris_scanner_thread_pool_thread_num` as the default value.
+        if (max_scanners_count <= 0) {
+            max_scanners_count = config::doris_scanner_thread_pool_thread_num;
         }
+
+        // Too small value of `min_rows_per_scanner` is meaningless.
+        auto min_rows_per_scanner =
+                std::max<int64_t>(1024, state()->parallel_scan_min_rows_per_scanner());
+        scanner_builder.set_max_scanners_count(max_scanners_count);
+        scanner_builder.set_min_rows_per_scanner(min_rows_per_scanner);
+
+        RETURN_IF_ERROR(scanner_builder.build_scanners(*scanners));
+        for (auto& scanner : *scanners) {
+            auto* olap_scanner = assert_cast<vectorized::NewOlapScanner*>(scanner.get());
+            RETURN_IF_ERROR(olap_scanner->prepare(state(), _conjuncts));
+            olap_scanner->set_compound_filters(_compound_filters);
+        }
+        return Status::OK();
     }
 
     int scanners_per_tablet = std::max(1, 64 / (int)_scan_ranges.size());
 
     auto build_new_scanner = [&](BaseTabletSPtr tablet, int64_t version,
                                  const std::vector<OlapScanRange*>& key_ranges) {
+        COUNTER_UPDATE(_key_range_counter, key_ranges.size());
         auto scanner = vectorized::NewOlapScanner::create_shared(
                 this, vectorized::NewOlapScanner::Params {
                               state(),
@@ -331,14 +344,15 @@ Status OlapScanLocalState::_init_scanners(std::list<vectorized::VScannerSPtr>* s
                               std::move(tablet),
                               version,
                               {},
-                              p._limit_per_scanner,
+                              p._limit,
                               p._olap_scan_node.is_preaggregation,
                       });
         RETURN_IF_ERROR(scanner->prepare(state(), _conjuncts));
         scanner->set_compound_filters(_compound_filters);
-        scanners->push_back(scanner);
+        scanners->push_back(std::move(scanner));
         return Status::OK();
     };
+
     for (auto& scan_range : _scan_ranges) {
         auto tablet = DORIS_TRY(ExecEnv::get_tablet(scan_range->tablet_id));
         int64_t version = 0;
@@ -380,7 +394,7 @@ void OlapScanLocalState::set_scan_ranges(RuntimeState* state,
     for (auto& scan_range : scan_ranges) {
         DCHECK(scan_range.scan_range.__isset.palo_scan_range);
         _scan_ranges.emplace_back(new TPaloScanRange(scan_range.scan_range.palo_scan_range));
-        //        COUNTER_UPDATE(_tablet_counter, 1);
+        COUNTER_UPDATE(_tablet_counter, 1);
     }
 }
 
@@ -559,8 +573,8 @@ void OlapScanLocalState::add_filter_info(int id, const PredicateFilterInfo& upda
                                                      TUnit::UNIT, "RuntimeFilterInfo", 1);
     auto* filtered_count = ADD_CHILD_COUNTER_WITH_LEVEL(_runtime_profile, rf_name + "filtered",
                                                         TUnit::UNIT, "RuntimeFilterInfo", 1);
-    COUNTER_UPDATE(input_count, info.input_row);
-    COUNTER_UPDATE(filtered_count, info.filtered_row);
+    COUNTER_SET(input_count, (int64_t)info.input_row);
+    COUNTER_SET(filtered_count, (int64_t)info.filtered_row);
 }
 
 OlapScanOperatorX::OlapScanOperatorX(ObjectPool* pool, const TPlanNode& tnode, int operator_id,
@@ -568,7 +582,6 @@ OlapScanOperatorX::OlapScanOperatorX(ObjectPool* pool, const TPlanNode& tnode, i
         : ScanOperatorX<OlapScanLocalState>(pool, tnode, operator_id, descs, parallel_tasks),
           _olap_scan_node(tnode.olap_scan_node) {
     _output_tuple_id = tnode.olap_scan_node.tuple_id;
-    _col_distribute_ids = tnode.olap_scan_node.distribute_column_ids;
     if (_olap_scan_node.__isset.sort_info && _olap_scan_node.__isset.sort_limit) {
         _limit_per_scanner = _olap_scan_node.sort_limit;
     }

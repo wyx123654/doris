@@ -18,14 +18,18 @@
 package org.apache.doris.datasource.hive;
 
 import org.apache.doris.analysis.TableName;
+import org.apache.doris.catalog.Column;
 import org.apache.doris.common.Config;
-import org.apache.doris.datasource.HMSClientException;
+import org.apache.doris.common.security.authentication.HadoopAuthenticator;
+import org.apache.doris.datasource.DatabaseMetadata;
+import org.apache.doris.datasource.TableMetadata;
 import org.apache.doris.datasource.hive.event.MetastoreNotificationFetchException;
 import org.apache.doris.datasource.property.constants.HMSProperties;
 
 import com.aliyun.datalake.metastore.hive2.ProxyMetaStoreClient;
 import com.amazonaws.glue.catalog.metastore.AWSCatalogMetastoreClient;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import org.apache.hadoop.hive.common.ValidReaderWriteIdList;
 import org.apache.hadoop.hive.common.ValidTxnList;
@@ -39,10 +43,12 @@ import org.apache.hadoop.hive.metastore.IMetaStoreClient;
 import org.apache.hadoop.hive.metastore.LockComponentBuilder;
 import org.apache.hadoop.hive.metastore.LockRequestBuilder;
 import org.apache.hadoop.hive.metastore.RetryingMetaStoreClient;
+import org.apache.hadoop.hive.metastore.api.Catalog;
 import org.apache.hadoop.hive.metastore.api.ColumnStatisticsObj;
 import org.apache.hadoop.hive.metastore.api.CurrentNotificationEventId;
 import org.apache.hadoop.hive.metastore.api.DataOperationType;
 import org.apache.hadoop.hive.metastore.api.Database;
+import org.apache.hadoop.hive.metastore.api.DefaultConstraintsRequest;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.LockComponent;
 import org.apache.hadoop.hive.metastore.api.LockResponse;
@@ -50,19 +56,27 @@ import org.apache.hadoop.hive.metastore.api.LockState;
 import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.hadoop.hive.metastore.api.NotificationEventResponse;
 import org.apache.hadoop.hive.metastore.api.Partition;
+import org.apache.hadoop.hive.metastore.api.SQLDefaultConstraint;
 import org.apache.hadoop.hive.metastore.api.Table;
 import org.apache.hadoop.hive.metastore.api.TableValidWriteIds;
 import org.apache.hadoop.hive.metastore.txn.TxnUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import shade.doris.hive.org.apache.thrift.TApplicationException;
 
+import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * This class uses the thrift protocol to directly access the HiveMetaStore service
@@ -76,8 +90,10 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     private static final short MAX_LIST_PARTITION_NUM = Config.max_hive_list_partition_num;
 
     private Queue<ThriftHMSClient> clientPool = new LinkedList<>();
+    private boolean isClosed = false;
     private final int poolSize;
     private final HiveConf hiveConf;
+    private HadoopAuthenticator hadoopAuthenticator;
 
     public ThriftHMSCachedClient(HiveConf hiveConf, int poolSize) {
         Preconditions.checkArgument(poolSize > 0, poolSize);
@@ -87,13 +103,32 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
         }
         this.hiveConf = hiveConf;
         this.poolSize = poolSize;
+        this.isClosed = false;
+    }
+
+    public void setHadoopAuthenticator(HadoopAuthenticator hadoopAuthenticator) {
+        this.hadoopAuthenticator = hadoopAuthenticator;
+    }
+
+    @Override
+    public void close() {
+        synchronized (clientPool) {
+            this.isClosed = true;
+            while (!clientPool.isEmpty()) {
+                try {
+                    clientPool.poll().close();
+                } catch (Exception e) {
+                    LOG.warn("failed to close thrift client", e);
+                }
+            }
+        }
     }
 
     @Override
     public List<String> getAllDatabases() {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getAllDatabases();
+                return ugiDoAs(client.client::getAllDatabases);
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -107,7 +142,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public List<String> getAllTables(String dbName) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getAllTables(dbName);
+                return ugiDoAs(() -> client.client.getAllTables(dbName));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -118,10 +153,125 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     }
 
     @Override
+    public void createDatabase(DatabaseMetadata db) {
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                if (db instanceof HiveDatabaseMetadata) {
+                    HiveDatabaseMetadata hiveDb = (HiveDatabaseMetadata) db;
+                    ugiDoAs(() -> {
+                        client.client.createDatabase(HiveUtil.toHiveDatabase(hiveDb));
+                        return null;
+                    });
+                }
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to create database from hms client", e);
+        }
+    }
+
+    @Override
+    public void createTable(TableMetadata tbl, boolean ignoreIfExists) {
+        if (tableExists(tbl.getDbName(), tbl.getTableName())) {
+            throw new HMSClientException("Table '" + tbl.getTableName()
+                    + "' has existed in '" + tbl.getDbName() + "'.");
+        }
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                // String location,
+                if (tbl instanceof HiveTableMetadata) {
+                    Table hiveTable = HiveUtil.toHiveTable((HiveTableMetadata) tbl);
+                    List<Column> tableColumns = ((HiveTableMetadata) tbl).getColumns();
+                    List<SQLDefaultConstraint> dvs = new ArrayList<>(tableColumns.size());
+                    for (Column tableColumn : tableColumns) {
+                        if (tableColumn.hasDefaultValue()) {
+                            SQLDefaultConstraint dv = new SQLDefaultConstraint();
+                            dv.setTable_db(tbl.getDbName());
+                            dv.setTable_name(tbl.getTableName());
+                            dv.setColumn_name(tableColumn.getName());
+                            dv.setDefault_value(tableColumn.getDefaultValue());
+                            dv.setDc_name(tableColumn.getName() + "_dv_constraint");
+                            dvs.add(dv);
+                        }
+                    }
+                    ugiDoAs(() -> {
+                        if (!dvs.isEmpty()) {
+                            // foreignKeys, uniqueConstraints, notNullConstraints, defaultConstraints, checkConstraints
+                            client.client.createTableWithConstraints(hiveTable, null,
+                                    null, null, null, dvs, null);
+                            return null;
+                        }
+                        client.client.createTable(hiveTable);
+                        return null;
+                    });
+                }
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to create table from hms client", e);
+        }
+    }
+
+    @Override
+    public void dropDatabase(String dbName) {
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                ugiDoAs(() -> {
+                    client.client.dropDatabase(dbName);
+                    return null;
+                });
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to drop database from hms client", e);
+        }
+    }
+
+    @Override
+    public void dropTable(String dbName, String tblName) {
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                ugiDoAs(() -> {
+                    client.client.dropTable(dbName, tblName);
+                    return null;
+                });
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to drop database from hms client", e);
+        }
+    }
+
+    @Override
+    public void truncateTable(String dbName, String tblName, List<String> partitions) {
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                ugiDoAs(() -> {
+                    client.client.truncateTable(dbName, tblName, partitions);
+                    return null;
+                });
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to truncate table %s in db %s.", e, tblName, dbName);
+        }
+    }
+
+    @Override
     public boolean tableExists(String dbName, String tblName) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.tableExists(dbName, tblName);
+                return ugiDoAs(() -> client.client.tableExists(dbName, tblName));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -136,13 +286,26 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
         return listPartitionNames(dbName, tblName, MAX_LIST_PARTITION_NUM);
     }
 
+    public List<Partition> listPartitions(String dbName, String tblName) {
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                return ugiDoAs(() -> client.client.listPartitions(dbName, tblName, MAX_LIST_PARTITION_NUM));
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to list partitions in table '%s.%s'.", e, dbName, tblName);
+        }
+    }
+
     @Override
     public List<String> listPartitionNames(String dbName, String tblName, long maxListPartitionNum) {
         // list all parts when the limit is greater than the short maximum
         short limited = maxListPartitionNum <= Short.MAX_VALUE ? (short) maxListPartitionNum : MAX_LIST_PARTITION_NUM;
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.listPartitionNames(dbName, tblName, limited);
+                return ugiDoAs(() -> client.client.listPartitionNames(dbName, tblName, limited));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -156,7 +319,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public Partition getPartition(String dbName, String tblName, List<String> partitionValues) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getPartition(dbName, tblName, partitionValues);
+                return ugiDoAs(() -> client.client.getPartition(dbName, tblName, partitionValues));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -171,7 +334,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public List<Partition> getPartitions(String dbName, String tblName, List<String> partitionNames) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getPartitionsByNames(dbName, tblName, partitionNames);
+                return ugiDoAs(() -> client.client.getPartitionsByNames(dbName, tblName, partitionNames));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -186,7 +349,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public Database getDatabase(String dbName) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getDatabase(dbName);
+                return ugiDoAs(() -> client.client.getDatabase(dbName));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -196,11 +359,42 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
         }
     }
 
+    public Map<String, String> getDefaultColumnValues(String dbName, String tblName) {
+        Map<String, String> res = new HashMap<>();
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                DefaultConstraintsRequest req = new DefaultConstraintsRequest();
+                req.setDb_name(dbName);
+                req.setTbl_name(tblName);
+                List<SQLDefaultConstraint> dvcs = ugiDoAs(() -> {
+                    try {
+                        return client.client.getDefaultConstraints(req);
+                    } catch (TApplicationException e) {
+                        if (e.getMessage().contains("Invalid method name: 'get_default_constraints'")) {
+                            // the getDefaultConstraints method only supported on hive3
+                            return ImmutableList.of();
+                        }
+                        throw e;
+                    }
+                });
+                for (SQLDefaultConstraint dvc : dvcs) {
+                    res.put(dvc.getColumn_name().toLowerCase(Locale.ROOT), dvc.getDefault_value());
+                }
+                return res;
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to get table %s in db %s from hms client", e, tblName, dbName);
+        }
+    }
+
     @Override
     public Table getTable(String dbName, String tblName) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getTable(dbName, tblName);
+                return ugiDoAs(() -> client.client.getTable(dbName, tblName));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -214,7 +408,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public List<FieldSchema> getSchema(String dbName, String tblName) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getSchema(dbName, tblName);
+                return ugiDoAs(() -> client.client.getSchema(dbName, tblName));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -228,7 +422,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public List<ColumnStatisticsObj> getTableColumnStatistics(String dbName, String tblName, List<String> columns) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getTableColumnStatistics(dbName, tblName, columns);
+                return ugiDoAs(() -> client.client.getTableColumnStatistics(dbName, tblName, columns));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -243,7 +437,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
             String dbName, String tblName, List<String> partNames, List<String> columns) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getPartitionColumnStatistics(dbName, tblName, partNames, columns);
+                return ugiDoAs(() -> client.client.getPartitionColumnStatistics(dbName, tblName, partNames, columns));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -257,7 +451,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public CurrentNotificationEventId getCurrentNotificationEventId() {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getCurrentNotificationEventId();
+                return ugiDoAs(client.client::getCurrentNotificationEventId);
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -271,12 +465,12 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
 
     @Override
     public NotificationEventResponse getNextNotification(long lastEventId,
-            int maxEvents,
-            IMetaStoreClient.NotificationFilter filter)
+                                                         int maxEvents,
+                                                         IMetaStoreClient.NotificationFilter filter)
             throws MetastoreNotificationFetchException {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.getNextNotification(lastEventId, maxEvents, filter);
+                return ugiDoAs(() -> client.client.getNextNotification(lastEventId, maxEvents, filter));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -293,7 +487,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public long openTxn(String user) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.openTxn(user);
+                return ugiDoAs(() -> client.client.openTxn(user));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -307,7 +501,10 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public void commitTxn(long txnId) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                client.client.commitTxn(txnId);
+                ugiDoAs(() -> {
+                    client.client.commitTxn(txnId);
+                    return null;
+                });
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -319,7 +516,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
 
     @Override
     public void acquireSharedLock(String queryId, long txnId, String user, TableName tblName,
-            List<String> partitionNames, long timeoutMs) {
+                                  List<String> partitionNames, long timeoutMs) {
         LockRequestBuilder request = new LockRequestBuilder(queryId).setTransactionId(txnId).setUser(user);
         List<LockComponent> lockComponents = createLockComponentsForRead(tblName, partitionNames);
         for (LockComponent component : lockComponents) {
@@ -328,7 +525,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
         try (ThriftHMSClient client = getClient()) {
             LockResponse response;
             try {
-                response = client.client.lock(request.build());
+                response = ugiDoAs(() -> client.client.lock(request.build()));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -356,20 +553,22 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     public ValidWriteIdList getValidWriteIds(String fullTableName, long currentTransactionId) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                // Pass currentTxn as 0L to get the recent snapshot of valid transactions in Hive
-                // Do not pass currentTransactionId instead as
-                // it will break Hive's listing of delta directories if major compaction
-                // deletes delta directories for valid transactions that existed at the time transaction is opened
-                ValidTxnList validTransactions = client.client.getValidTxns();
-                List<TableValidWriteIds> tableValidWriteIdsList = client.client.getValidWriteIds(
-                        Collections.singletonList(fullTableName), validTransactions.toString());
-                if (tableValidWriteIdsList.size() != 1) {
-                    throw new Exception("tableValidWriteIdsList's size should be 1");
-                }
-                ValidTxnWriteIdList validTxnWriteIdList = TxnUtils.createValidTxnWriteIdList(currentTransactionId,
-                        tableValidWriteIdsList);
-                ValidWriteIdList writeIdList = validTxnWriteIdList.getTableValidWriteIdList(fullTableName);
-                return writeIdList;
+                return ugiDoAs(() -> {
+                    // Pass currentTxn as 0L to get the recent snapshot of valid transactions in Hive
+                    // Do not pass currentTransactionId instead as
+                    // it will break Hive's listing of delta directories if major compaction
+                    // deletes delta directories for valid transactions that existed at the time transaction is opened
+                    ValidTxnList validTransactions = client.client.getValidTxns();
+                    List<TableValidWriteIds> tableValidWriteIdsList = client.client.getValidWriteIds(
+                            Collections.singletonList(fullTableName), validTransactions.toString());
+                    if (tableValidWriteIdsList.size() != 1) {
+                        throw new Exception("tableValidWriteIdsList's size should be 1");
+                    }
+                    ValidTxnWriteIdList validTxnWriteIdList = TxnUtils.createValidTxnWriteIdList(currentTransactionId,
+                            tableValidWriteIdsList);
+                    ValidWriteIdList writeIdList = validTxnWriteIdList.getTableValidWriteIdList(fullTableName);
+                    return writeIdList;
+                });
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -385,7 +584,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
     private LockResponse checkLock(long lockId) {
         try (ThriftHMSClient client = getClient()) {
             try {
-                return client.client.checkLock(lockId);
+                return ugiDoAs(() -> client.client.checkLock(lockId));
             } catch (Exception e) {
                 client.setThrowable(e);
                 throw e;
@@ -444,7 +643,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
         @Override
         public void close() throws Exception {
             synchronized (clientPool) {
-                if (throwable != null || clientPool.size() > poolSize) {
+                if (isClosed || throwable != null || clientPool.size() > poolSize) {
                     client.close();
                 } else {
                     clientPool.offer(this);
@@ -460,7 +659,7 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
             synchronized (clientPool) {
                 ThriftHMSClient client = clientPool.poll();
                 if (client == null) {
-                    return new ThriftHMSClient(hiveConf);
+                    return ugiDoAs(() -> new ThriftHMSClient(hiveConf));
                 }
                 return client;
             }
@@ -468,5 +667,98 @@ public class ThriftHMSCachedClient implements HMSCachedClient {
             Thread.currentThread().setContextClassLoader(classLoader);
         }
     }
-}
 
+    @Override
+    public String getCatalogLocation(String catalogName) {
+        try (ThriftHMSClient client = getClient()) {
+            try {
+                Catalog catalog = ugiDoAs(() -> client.client.getCatalog(catalogName));
+                return catalog.getLocationUri();
+            } catch (Exception e) {
+                client.setThrowable(e);
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new HMSClientException("failed to get location for %s from hms client", e, catalogName);
+        }
+    }
+
+    private <T> T ugiDoAs(PrivilegedExceptionAction<T> action) {
+        try {
+            return hadoopAuthenticator.doAs(action);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void updateTableStatistics(
+            String dbName,
+            String tableName,
+            Function<HivePartitionStatistics, HivePartitionStatistics> update) {
+        try (ThriftHMSClient client = getClient()) {
+
+            Table originTable = getTable(dbName, tableName);
+            Map<String, String> originParams = originTable.getParameters();
+            HivePartitionStatistics updatedStats = update.apply(HiveUtil.toHivePartitionStatistics(originParams));
+
+            Table newTable = originTable.deepCopy();
+            Map<String, String> newParams =
+                    HiveUtil.updateStatisticsParameters(originParams, updatedStats.getCommonStatistics());
+            newParams.put("transient_lastDdlTime", String.valueOf(System.currentTimeMillis() / 1000));
+            newTable.setParameters(newParams);
+            client.client.alter_table(dbName, tableName, newTable);
+        } catch (Exception e) {
+            throw new RuntimeException("failed to update table statistics for " + dbName + "." + tableName, e);
+        }
+    }
+
+    @Override
+    public void updatePartitionStatistics(
+            String dbName,
+            String tableName,
+            String partitionName,
+            Function<HivePartitionStatistics, HivePartitionStatistics> update) {
+        try (ThriftHMSClient client = getClient()) {
+            List<Partition> partitions = client.client.getPartitionsByNames(
+                    dbName, tableName, ImmutableList.of(partitionName));
+            if (partitions.size() != 1) {
+                throw new RuntimeException("Metastore returned multiple partitions for name: " + partitionName);
+            }
+
+            Partition originPartition = partitions.get(0);
+            Map<String, String> originParams = originPartition.getParameters();
+            HivePartitionStatistics updatedStats = update.apply(HiveUtil.toHivePartitionStatistics(originParams));
+
+            Partition modifiedPartition = originPartition.deepCopy();
+            Map<String, String> newParams =
+                    HiveUtil.updateStatisticsParameters(originParams, updatedStats.getCommonStatistics());
+            newParams.put("transient_lastDdlTime", String.valueOf(System.currentTimeMillis() / 1000));
+            modifiedPartition.setParameters(newParams);
+            client.client.alter_partition(dbName, tableName, modifiedPartition);
+        } catch (Exception e) {
+            throw new RuntimeException("failed to update table statistics for " + dbName + "." + tableName, e);
+        }
+    }
+
+    @Override
+    public void addPartitions(String dbName, String tableName, List<HivePartitionWithStatistics> partitions) {
+        try (ThriftHMSClient client = getClient()) {
+            List<Partition> hivePartitions = partitions.stream()
+                    .map(HiveUtil::toMetastoreApiPartition)
+                    .collect(Collectors.toList());
+            client.client.add_partitions(hivePartitions);
+        } catch (Exception e) {
+            throw new RuntimeException("failed to add partitions for " + dbName + "." + tableName, e);
+        }
+    }
+
+    @Override
+    public void dropPartition(String dbName, String tableName, List<String> partitionValues, boolean deleteData) {
+        try (ThriftHMSClient client = getClient()) {
+            client.client.dropPartition(dbName, tableName, partitionValues, deleteData);
+        } catch (Exception e) {
+            throw new RuntimeException("failed to drop partition for " + dbName + "." + tableName, e);
+        }
+    }
+}

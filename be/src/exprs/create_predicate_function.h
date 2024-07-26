@@ -34,7 +34,9 @@ public:
     using BasePtr = MinMaxFuncBase*;
     template <PrimitiveType type, size_t N>
     static BasePtr get_function() {
-        return new MinMaxNumFunc<typename PrimitiveTypeTraits<type>::CppType>();
+        using CppType = typename PrimitiveTypeTraits<type>::CppType;
+        return new MinMaxNumFunc<
+                std::conditional_t<std::is_same_v<CppType, StringRef>, std::string, CppType>>();
     }
 };
 
@@ -232,7 +234,7 @@ ColumnPredicate* create_olap_column_predicate(uint32_t column_id,
     std::shared_ptr<BloomFilterFuncBase> filter_olap;
     filter_olap.reset(create_bloom_filter(PT));
     filter_olap->light_copy(filter.get());
-    return new BloomFilterColumnPredicate<PT>(column_id, filter, be_exec_version);
+    return new BloomFilterColumnPredicate<PT>(column_id, filter);
 }
 
 template <PrimitiveType PT>

@@ -49,26 +49,26 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
-    @SerializedName(value = "indexId")
+    @SerializedName(value = "id", alternate = {"indexId"})
     private long indexId;
-    @SerializedName(value = "schema")
+    @SerializedName(value = "sc", alternate = {"schema"})
     private List<Column> schema = Lists.newArrayList();
-    @SerializedName(value = "schemaVersion")
+    @SerializedName(value = "sv", alternate = {"schemaVersion"})
     private int schemaVersion;
-    @SerializedName(value = "schemaHash")
+    @SerializedName(value = "sh", alternate = {"schemaHash"})
     private int schemaHash;
-    @SerializedName(value = "shortKeyColumnCount")
+    @SerializedName(value = "skcc", alternate = {"shortKeyColumnCount"})
     private short shortKeyColumnCount;
-    @SerializedName(value = "storageType")
+    @SerializedName(value = "st", alternate = {"storageType"})
     private TStorageType storageType;
-    @SerializedName(value = "keysType")
+    @SerializedName(value = "kt", alternate = {"keysType"})
     private KeysType keysType;
-    @SerializedName(value = "defineStmt")
+    @SerializedName(value = "dst", alternate = {"defineStmt"})
     private OriginStatement defineStmt;
     //for light schema change
-    @SerializedName(value = "maxColUniqueId")
+    @SerializedName(value = "mcui", alternate = {"maxColUniqueId"})
     private int maxColUniqueId = Column.COLUMN_UNIQUE_ID_INIT_VALUE;
-    @SerializedName(value = "indexes")
+    @SerializedName(value = "idx", alternate = {"indexes"})
     private List<Index> indexes;
 
     private Expr whereClause;
@@ -122,6 +122,10 @@ public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
         return indexId;
     }
 
+    public void resetIndexIdForRestore(long id) {
+        indexId = id;
+    }
+
     public KeysType getKeysType() {
         return keysType;
     }
@@ -158,6 +162,18 @@ public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
         this.schema = newSchema;
         parseStmt(null);
         initColumnNameMap();
+    }
+
+    public List<Column> getPrefixKeyColumns() {
+        List<Column> keys = Lists.newArrayList();
+        for (Column col : schema) {
+            if (col.isKey()) {
+                keys.add(col);
+            } else {
+                break;
+            }
+        }
+        return keys;
     }
 
     public void setSchemaHash(int newSchemaHash) {
@@ -303,6 +319,7 @@ public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
         CreateMaterializedViewStmt stmt;
         try {
             stmt = (CreateMaterializedViewStmt) SqlParserUtils.getStmt(parser, defineStmt.idx);
+            stmt.setIsReplay(true);
             if (analyzer != null) {
                 try {
                     stmt.analyze(analyzer);
@@ -312,7 +329,6 @@ public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
                 }
             }
 
-            stmt.setIsReplay(true);
             setWhereClause(stmt.getWhereClause());
             stmt.rewriteToBitmapWithCheck();
             try {
@@ -345,8 +361,10 @@ public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
         maxColUniqueId = Column.COLUMN_UNIQUE_ID_INIT_VALUE;
         this.schema.forEach(column -> {
             column.setUniqueId(incAndGetMaxColUniqueId());
-            LOG.debug("indexId: {},  column:{}, uniqueId:{}",
-                    indexId, column, column.getUniqueId());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("indexId: {},  column:{}, uniqueId:{}",
+                        indexId, column, column.getUniqueId());
+            }
         });
     }
 

@@ -296,10 +296,21 @@ struct TypeId<String> {
 /// Not a data type in database, defined just for convenience.
 using Strings = std::vector<String>;
 
-using Int128 = __int128;
+using IPv4 = uint32_t;
+using IPv6 = uint128_t;
 
-using IPv4 = UInt32;
-using IPv6 = Int128;
+template <>
+inline constexpr bool IsNumber<IPv6> = true;
+template <>
+struct TypeName<IPv6> {
+    static const char* get() { return "IPv6"; }
+};
+template <>
+struct TypeId<IPv6> {
+    static constexpr const TypeIndex value = TypeIndex::IPv6;
+};
+
+using Int128 = __int128;
 
 template <>
 inline constexpr bool IsNumber<Int128> = true;
@@ -412,6 +423,13 @@ std::string decimal_to_string(const T& value, UInt32 scale) {
 }
 
 template <typename T>
+std::string decimal_to_string(const T& orig_value, UInt32 trunc_precision, UInt32 scale) {
+    T multiplier = decimal_scale_multiplier<T>(trunc_precision);
+    T value = orig_value % multiplier;
+    return decimal_to_string(value, scale);
+}
+
+template <typename T>
 size_t decimal_to_string(const T& value, char* dst, UInt32 scale, const T& scale_multiplier) {
     if (UNLIKELY(value == std::numeric_limits<T>::min())) {
         if constexpr (std::is_same_v<T, wide::Int256>) {
@@ -514,6 +532,7 @@ struct Decimal {
     explicit(IsInt256) Decimal(Int32 value) noexcept : value(value) {}
     explicit(IsInt256) Decimal(Int64 value) noexcept : value(value) {}
     explicit(IsInt256) Decimal(Int128 value) noexcept : value(value) {}
+    explicit(IsInt256) Decimal(IPv6 value) noexcept : value(value) {}
     explicit(IsInt256) Decimal(wide::Int256 value) noexcept : value(value) {}
     explicit(IsInt256) Decimal(UInt64 value) noexcept : value(value) {}
     explicit(IsInt256) Decimal(UInt32 value) noexcept : value(value) {}
@@ -522,11 +541,11 @@ struct Decimal {
 
     /// If T is integral, the given value will be rounded to integer.
     template <std::floating_point U>
-    static constexpr U type_round(U value) noexcept {
+    static constexpr T type_round(U value) noexcept {
         if constexpr (wide::IntegralConcept<T>()) {
-            return round(value);
+            return T(round(value));
         }
-        return value;
+        return T(value);
     }
 
     static Decimal double_to_decimal(double value_) {
@@ -609,6 +628,12 @@ struct Decimal {
 
     std::string to_string(UInt32 scale) const { return decimal_to_string(value, scale); }
 
+    // truncate to specified precision and scale,
+    // used by runtime filter only for now.
+    std::string to_string(UInt32 precision, UInt32 scale) const {
+        return decimal_to_string(value, precision, scale);
+    }
+
     /**
      * Got the string representation of a decimal.
      * @param dst Store the result, should be pre-allocated.
@@ -658,6 +683,7 @@ struct Decimal128V3 : public Decimal<Int128> {
 
     DECLARE_NUMERIC_CTOR(wide::Int256)
     DECLARE_NUMERIC_CTOR(Int128)
+    DECLARE_NUMERIC_CTOR(IPv6)
     DECLARE_NUMERIC_CTOR(Int32)
     DECLARE_NUMERIC_CTOR(Int64)
     DECLARE_NUMERIC_CTOR(UInt32)

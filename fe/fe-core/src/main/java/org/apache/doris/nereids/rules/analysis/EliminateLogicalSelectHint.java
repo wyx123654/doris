@@ -26,9 +26,11 @@ import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.hint.Hint;
 import org.apache.doris.nereids.hint.LeadingHint;
 import org.apache.doris.nereids.hint.OrderedHint;
+import org.apache.doris.nereids.hint.UseCboRuleHint;
 import org.apache.doris.nereids.properties.SelectHint;
 import org.apache.doris.nereids.properties.SelectHintLeading;
 import org.apache.doris.nereids.properties.SelectHintSetVar;
+import org.apache.doris.nereids.properties.SelectHintUseCboRule;
 import org.apache.doris.nereids.rules.Rule;
 import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.nereids.rules.rewrite.OneRewriteRuleFactory;
@@ -73,6 +75,8 @@ public class EliminateLogicalSelectHint extends OneRewriteRuleFactory {
                 } else if (hintName.equalsIgnoreCase("LEADING")) {
                     extractLeading((SelectHintLeading) hint.getValue(), ctx.cascadesContext,
                             ctx.statementContext, selectHintPlan.getHints());
+                } else if (hintName.equalsIgnoreCase("USE_CBO_RULE")) {
+                    extractRule((SelectHintUseCboRule) hint.getValue(), ctx.statementContext);
                 } else {
                     logger.warn("Can not process select hint '{}' and skip it", hint.getKey());
                 }
@@ -91,6 +95,7 @@ public class EliminateLogicalSelectHint extends OneRewriteRuleFactory {
             if (value.isPresent()) {
                 try {
                     VariableMgr.setVar(sessionVariable, new SetVar(key, new StringLiteral(value.get())));
+                    context.invalidCache(key);
                 } catch (Throwable t) {
                     throw new AnalysisException("Can not set session variable '"
                         + key + "' = '" + value.get() + "'", t);
@@ -121,12 +126,21 @@ public class EliminateLogicalSelectHint extends OneRewriteRuleFactory {
             context.setLeadingJoin(false);
             return;
         }
+        statementContext.addHint(hint);
+        context.getHintMap().put("Leading", hint);
+        if (hint.getTablelist().size() < 2) {
+            hint.setStatus(Hint.HintStatus.SYNTAX_ERROR);
+            context.getHintMap().get("Leading").setStatus(Hint.HintStatus.UNUSED);
+            hint.setErrorMessage("less than two tables is not allowed in leading clause");
+            statementContext.addHint(hint);
+            context.setLeadingJoin(false);
+            return;
+        }
         if (!hint.isSyntaxError()) {
             hint.setStatus(Hint.HintStatus.SUCCESS);
         }
-        statementContext.addHint(hint);
-        context.getHintMap().put("Leading", hint);
-        if (hints.get("ordered") != null || ConnectContext.get().getSessionVariable().isDisableJoinReorder()) {
+        if (hints.get("ordered") != null || ConnectContext.get().getSessionVariable().isDisableJoinReorder()
+                || context.isLeadingDisableJoinReorder()) {
             context.setLeadingJoin(false);
             hint.setStatus(Hint.HintStatus.UNUSED);
         } else {
@@ -134,6 +148,14 @@ public class EliminateLogicalSelectHint extends OneRewriteRuleFactory {
         }
         assert (selectHint != null);
         assert (context != null);
+    }
+
+    private void extractRule(SelectHintUseCboRule selectHint, StatementContext statementContext) {
+        // rule hint need added to statementContext only cause it's set in all scopes
+        for (String parameter : selectHint.getParameters()) {
+            UseCboRuleHint hint = new UseCboRuleHint(parameter, selectHint.isNotUseCboRule());
+            statementContext.addHint(hint);
+        }
     }
 
 }

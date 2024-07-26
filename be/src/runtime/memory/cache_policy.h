@@ -17,11 +17,13 @@
 
 #pragma once
 
+#include "runtime/exec_env.h"
 #include "util/runtime_profile.h"
 
 namespace doris {
 
 static constexpr int32_t CACHE_MIN_FREE_SIZE = 67108864; // 64M
+static constexpr int32_t CACHE_MIN_FREE_NUMBER = 1024;
 
 // Base of all caches. register to CacheManager when cache is constructed.
 class CachePolicy {
@@ -42,6 +44,9 @@ public:
         COMMON_OBJ_LRU_CACHE = 12,
         FOR_UT = 13,
         TABLET_SCHEMA_CACHE = 14,
+        CREATE_TABLET_RR_IDX_CACHE = 15,
+        CLOUD_TABLET_CACHE = 16,
+        CLOUD_TXN_DELETE_BITMAP_CACHE = 17,
     };
 
     static std::string type_string(CacheType type) {
@@ -76,6 +81,12 @@ public:
             return "ForUT";
         case CacheType::TABLET_SCHEMA_CACHE:
             return "TabletSchemaCache";
+        case CacheType::CREATE_TABLET_RR_IDX_CACHE:
+            return "CreateTabletRRIdxCache";
+        case CacheType::CLOUD_TABLET_CACHE:
+            return "CloudTabletCache";
+        case CacheType::CLOUD_TXN_DELETE_BITMAP_CACHE:
+            return "CloudTxnDeleteBitmapCache";
         default:
             LOG(FATAL) << "not match type of cache policy :" << static_cast<int>(type);
         }
@@ -87,7 +98,7 @@ public:
     virtual ~CachePolicy();
 
     virtual void prune_stale() = 0;
-    virtual void prune_all(bool clear) = 0;
+    virtual void prune_all(bool force) = 0;
 
     CacheType type() { return _type; }
     bool enable_prune() const { return _enable_prune; }
@@ -105,7 +116,6 @@ protected:
     }
 
     CacheType _type;
-    std::list<CachePolicy*>::iterator _it;
 
     std::unique_ptr<RuntimeProfile> _profile;
     RuntimeProfile::Counter* _prune_stale_number_counter = nullptr;

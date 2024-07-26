@@ -21,7 +21,7 @@ import org.apache.doris.nereids.CascadesContext;
 import org.apache.doris.nereids.analyzer.UnboundRelation;
 import org.apache.doris.nereids.analyzer.UnboundSlot;
 import org.apache.doris.nereids.parser.NereidsParser;
-import org.apache.doris.nereids.rules.expression.rules.FunctionBinder;
+import org.apache.doris.nereids.rules.analysis.ExpressionAnalyzer;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
@@ -30,6 +30,7 @@ import org.apache.doris.nereids.types.BigIntType;
 import org.apache.doris.nereids.types.BooleanType;
 import org.apache.doris.nereids.types.DataType;
 import org.apache.doris.nereids.types.DateV2Type;
+import org.apache.doris.nereids.types.DecimalV3Type;
 import org.apache.doris.nereids.types.DoubleType;
 import org.apache.doris.nereids.types.IntegerType;
 import org.apache.doris.nereids.types.StringType;
@@ -45,7 +46,7 @@ import org.junit.jupiter.api.Assertions;
 import java.util.List;
 import java.util.Map;
 
-public abstract class ExpressionRewriteTestHelper {
+public abstract class ExpressionRewriteTestHelper extends ExpressionRewrite {
     protected static final NereidsParser PARSER = new NereidsParser();
     protected ExpressionRuleExecutor executor;
 
@@ -77,6 +78,12 @@ public abstract class ExpressionRewriteTestHelper {
         Assertions.assertEquals(expectedExpression, rewrittenExpression);
     }
 
+    protected void assertNotRewrite(Expression expression, Expression expectedExpression) {
+        expression = typeCoercion(expression);
+        Expression rewrittenExpression = executor.rewrite(expression, context);
+        Assertions.assertNotEquals(expectedExpression, rewrittenExpression);
+    }
+
     protected void assertRewriteAfterTypeCoercion(String expression, String expected) {
         Map<String, Slot> mem = Maps.newHashMap();
         Expression needRewriteExpression = PARSER.parseExpression(expression);
@@ -105,7 +112,7 @@ public abstract class ExpressionRewriteTestHelper {
     }
 
     protected Expression typeCoercion(Expression expression) {
-        return FunctionBinder.INSTANCE.rewrite(expression, null);
+        return ExpressionAnalyzer.FUNCTION_ANALYZER_RULE.rewrite(expression, null);
     }
 
     protected DataType getType(char t) {
@@ -124,6 +131,8 @@ public abstract class ExpressionRewriteTestHelper {
                 return BooleanType.INSTANCE;
             case 'C':
                 return DateV2Type.INSTANCE;
+            case 'M':
+                return DecimalV3Type.SYSTEM_DEFAULT;
             default:
                 return BigIntType.INSTANCE;
         }

@@ -18,10 +18,6 @@
 import org.codehaus.groovy.runtime.IOGroovyMethods
 
 suite ("test_dup_mv_plus") {
-
-    // because nereids cannot support rollup correctly forbid it temporary
-    sql """set enable_nereids_planner=false"""
-
     sql """ DROP TABLE IF EXISTS d_table; """
 
     sql """
@@ -44,6 +40,9 @@ suite ("test_dup_mv_plus") {
 
     sql "insert into d_table select -4,-4,-4,'d';"
 
+    sql "analyze table d_table with sync;"
+    sql """set enable_stats=false;"""
+
     qt_select_star "select * from d_table order by k1;"
 
     explain {
@@ -59,10 +58,10 @@ suite ("test_dup_mv_plus") {
     qt_select_mv_sub "select k2+1 from d_table order by k1;"
 
     explain {
-        sql("select k2+1-1 from d_table order by k1;")
+        sql("select k2+1 from d_table order by k1+1-1;")
         contains "(k12p)"
     }
-    qt_select_mv_sub_add "select k2+1-1 from d_table order by k1;"
+    qt_select_mv_sub_add "select k2+1-1 from d_table order by k1+1-1;"
 
     explain {
         sql("select sum(k2+1) from d_table group by k1 order by k1;")
@@ -77,10 +76,10 @@ suite ("test_dup_mv_plus") {
     qt_select_group_mv "select sum(k1) from d_table group by k2+1 order by k2+1;"
 
     explain {
-        sql("select sum(k2+1-1) from d_table group by k1 order by k1;")
+        sql("select sum(k1+1-1) from d_table group by k2+1 order by k2+1;")
         contains "(k12p)"
     }
-    qt_select_group_mv_add "select sum(k2+1-1) from d_table group by k1 order by k1;"
+    qt_select_group_mv_add "select sum(k1+1-1) from d_table group by k2+1 order by k2+1;"
 
     explain {
         sql("select sum(k2) from d_table group by k3;")
@@ -93,4 +92,46 @@ suite ("test_dup_mv_plus") {
         contains "(d_table)"
     }
     qt_select_mv "select k1,k2+1 from d_table order by k2;"
+
+    sql """set enable_stats=true;"""
+
+    explain {
+        sql("select k1,k2+1 from d_table order by k1;")
+        contains "(k12p)"
+    }
+
+    explain {
+        sql("select k2+1 from d_table order by k1;")
+        contains "(k12p)"
+    }
+
+    explain {
+        sql("select k2+1 from d_table order by k1+1-1;")
+        contains "(k12p)"
+    }
+
+    explain {
+        sql("select sum(k2+1) from d_table group by k1 order by k1;")
+        contains "(k12p)"
+    }
+
+    explain {
+        sql("select sum(k1) from d_table group by k2+1 order by k2+1;")
+        contains "(k12p)"
+    }
+
+    explain {
+        sql("select sum(k1+1-1) from d_table group by k2+1 order by k2+1;")
+        contains "(k12p)"
+    }
+
+    explain {
+        sql("select sum(k2) from d_table group by k3;")
+        contains "(d_table)"
+    }
+
+    explain {
+        sql("select k1,k2+1 from d_table order by k2;")
+        contains "(d_table)"
+    }
 }

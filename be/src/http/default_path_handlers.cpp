@@ -22,7 +22,9 @@
 #include <boost/algorithm/string/replace.hpp>
 #ifdef USE_JEMALLOC
 #include "jemalloc/jemalloc.h"
-#else
+#endif
+#if !defined(__SANITIZE_ADDRESS__) && !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && \
+        !defined(THREAD_SANITIZER) && !defined(USE_JEMALLOC)
 #include <gperftools/malloc_extension.h>
 #endif
 
@@ -40,6 +42,7 @@
 #include "gutil/strings/substitute.h"
 #include "http/action/tablets_info_action.h"
 #include "http/web_page_handler.h"
+#include "runtime/memory/global_memory_arbitrator.h"
 #include "runtime/memory/mem_tracker.h"
 #include "runtime/memory/mem_tracker_limiter.h"
 #include "util/easy_json.h"
@@ -127,7 +130,7 @@ void mem_usage_handler(const WebPageHandler::ArgumentMap& args, std::stringstrea
 
 void display_tablets_callback(const WebPageHandler::ArgumentMap& args, EasyJson* ej) {
     std::string tablet_num_to_return;
-    WebPageHandler::ArgumentMap::const_iterator it = args.find("limit");
+    auto it = args.find("limit");
     if (it != args.end()) {
         tablet_num_to_return = it->second;
     } else {
@@ -153,11 +156,12 @@ void mem_tracker_handler(const WebPageHandler::ArgumentMap& args, std::stringstr
         } else if (iter->second == "schema_change") {
             MemTrackerLimiter::make_type_snapshots(&snapshots,
                                                    MemTrackerLimiter::Type::SCHEMA_CHANGE);
-        } else if (iter->second == "clone") {
-            MemTrackerLimiter::make_type_snapshots(&snapshots, MemTrackerLimiter::Type::CLONE);
-        } else if (iter->second == "experimental") {
-            MemTrackerLimiter::make_type_snapshots(&snapshots,
-                                                   MemTrackerLimiter::Type::EXPERIMENTAL);
+        } else if (iter->second == "other") {
+            MemTrackerLimiter::make_type_snapshots(&snapshots, MemTrackerLimiter::Type::OTHER);
+        } else if (iter->second == "reserved_memory") {
+            GlobalMemoryArbitrator::make_reserved_memory_snapshots(&snapshots);
+        } else if (iter->second == "all") {
+            MemTrackerLimiter::make_all_memory_state_snapshots(&snapshots);
         }
     } else {
         (*output) << "<h4>*Notice:</h4>\n";
@@ -397,7 +401,10 @@ void add_default_path_handlers(WebPageHandler* web_page_handler) {
     web_page_handler->register_page("/memz", "Memory", mem_usage_handler, true /* is_on_nav_bar */);
     web_page_handler->register_page(
             "/mem_tracker", "MemTracker",
-            std::bind<void>(&mem_tracker_handler, std::placeholders::_1, std::placeholders::_2),
+            [](auto&& PH1, auto&& PH2) {
+                return mem_tracker_handler(std::forward<decltype(PH1)>(PH1),
+                                           std::forward<decltype(PH2)>(PH2));
+            },
             true /* is_on_nav_bar */);
     web_page_handler->register_page("/heap", "Heap Profile", heap_handler,
                                     true /* is_on_nav_bar */);
@@ -405,8 +412,10 @@ void add_default_path_handlers(WebPageHandler* web_page_handler) {
     register_thread_display_page(web_page_handler);
     web_page_handler->register_template_page(
             "/tablets_page", "Tablets",
-            std::bind<void>(&display_tablets_callback, std::placeholders::_1,
-                            std::placeholders::_2),
+            [](auto&& PH1, auto&& PH2) {
+                return display_tablets_callback(std::forward<decltype(PH1)>(PH1),
+                                                std::forward<decltype(PH2)>(PH2));
+            },
             true /* is_on_nav_bar */);
 }
 

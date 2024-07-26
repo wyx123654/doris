@@ -18,6 +18,7 @@
 import org.codehaus.groovy.runtime.IOGroovyMethods
 
 suite("test_index_compaction_failure_injection", "nonConcurrent") {
+    def isCloudMode = isCloudMode()
     def tableName = "test_index_compaction_failure_injection_dups"
     def backendId_to_backendIP = [:]
     def backendId_to_backendHttpPort = [:]
@@ -32,10 +33,10 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
         }
     }
 
-    def trigger_full_compaction_on_tablets = { String[][] tablets ->
-        for (String[] tablet : tablets) {
-            String tablet_id = tablet[0]
-            String backend_id = tablet[2]
+    def trigger_full_compaction_on_tablets = { tablets ->
+        for (def tablet : tablets) {
+            String tablet_id = tablet.TabletId
+            String backend_id = tablet.BackendId
             int times = 1
 
             String compactionStatus;
@@ -58,13 +59,13 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
         }
     }
 
-    def wait_full_compaction_done = { String[][] tablets ->
-        for (String[] tablet in tablets) {
+    def wait_full_compaction_done = { tablets ->
+        for (def tablet in tablets) {
             boolean running = true
             do {
                 Thread.sleep(1000)
-                String tablet_id = tablet[0]
-                String backend_id = tablet[2]
+                String tablet_id = tablet.TabletId
+                String backend_id = tablet.BackendId
                 def (code, out, err) = be_get_compaction_status(backendId_to_backendIP.get(backend_id), backendId_to_backendHttpPort.get(backend_id), tablet_id)
                 logger.info("Get compaction status: code=" + code + ", out=" + out + ", err=" + err)
                 assertEquals(code, 0)
@@ -75,11 +76,10 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
         }
     }
 
-    def get_rowset_count = {String[][] tablets ->
+    def get_rowset_count = { tablets ->
         int rowsetCount = 0
-        for (String[] tablet in tablets) {
-            def compactionStatusUrlIndex = 18
-            def (code, out, err) = curl("GET", tablet[compactionStatusUrlIndex])
+        for (def tablet in tablets) {
+            def (code, out, err) = curl("GET", tablet.CompactionStatus)
             logger.info("Show tablets status: code=" + code + ", out=" + out + ", err=" + err)
             assertEquals(code, 0)
             def tabletJson = parseJson(out.trim())
@@ -121,12 +121,20 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
         qt_sql """ select * from ${tableName} where score < 100 order by id, name, hobbies, score """
     }
 
-    def run_test = { String[][] tablets ->
+    def run_test = { tablets ->
         insert_data.call()
 
         run_sql.call()
 
         int replicaNum = 1
+        def dedup_tablets = deduplicate_tablets(tablets)
+        if (dedup_tablets.size() > 0) {
+            replicaNum = Math.round(tablets.size() / dedup_tablets.size())
+            if (replicaNum != 1 && replicaNum != 3) {
+                assert(false)
+            }
+        }
+
         // before full compaction, there are 7 rowsets.
         int rowsetCount = get_rowset_count.call(tablets);
         assert (rowsetCount == 7 * replicaNum)
@@ -153,7 +161,11 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
 
         // after full compaction, there is only 1 rowset.
         rowsetCount = get_rowset_count.call(tablets);
-        assert (rowsetCount == 1 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (1 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 1 * replicaNum)
+        }
 
         run_sql.call()
 
@@ -164,7 +176,11 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
 
         // insert 6 rows, so there are 7 rowsets.
         rowsetCount = get_rowset_count.call(tablets);
-        assert (rowsetCount == 7 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (7 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 7 * replicaNum)
+        }
 
         // tigger full compaction for all tablets with fault injection
         try {
@@ -178,10 +194,16 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
         // insert more data
         insert_data.call()
 
+        sql """ select * from ${tableName} """
+
         // after fault injection, there are still 7 rowsets.
         // and we insert 6 rows, so there are 13 rowsets.
         rowsetCount = get_rowset_count.call(tablets);
-        assert (rowsetCount == 13 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (13 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 13 * replicaNum)
+        }
 
         logger.info("trigger_full_compaction_on_tablets normally")
         // trigger full compactions for all tablets in ${tableName}
@@ -193,25 +215,41 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
 
         // after full compaction, there is only 1 rowset.
         rowsetCount = get_rowset_count.call(tablets);
-        assert (rowsetCount == 1 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (1 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 1 * replicaNum)
+        }
 
         run_sql.call()
 
         // insert more data and trigger full compaction again
         insert_data.call()
         
+        sql """ select * from ${tableName} """
+
         // insert 6 rows, so there are 7 rowsets.
         rowsetCount = get_rowset_count.call(tablets);
-        assert (rowsetCount == 7 * replicaNum)
-
+        if (isCloudMode) {
+            assert (rowsetCount == (7 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 7 * replicaNum)
+        }
         // tigger full compaction for all tablets normally
         // this time, index compaction will be done successfully
         logger.info("trigger_full_compaction_on_tablets normally")
         trigger_full_compaction_on_tablets.call(tablets)
 
+        // wait for full compaction done
+        wait_full_compaction_done.call(tablets)
+
         // after full compaction, there is only 1 rowset.
         rowsetCount = get_rowset_count.call(tablets);
-        assert (rowsetCount == 1 * replicaNum)
+        if (isCloudMode) {
+            assert (rowsetCount == (1 + 1) * replicaNum)
+        } else {
+            assert (rowsetCount == 1 * replicaNum)
+        }
 
         run_sql.call()
     }
@@ -240,9 +278,15 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
             }
         }
         set_be_config.call("inverted_index_compaction_enable", "true")
+        if (isCloudMode) {
+            set_be_config.call("disable_auto_compaction", "true")
+        }
         has_update_be_config = true
         // check updated config
         check_config.call("inverted_index_compaction_enable", "true");
+        if (isCloudMode) {
+            check_config.call("disable_auto_compaction", "true")
+        }
 
 
         /**
@@ -266,7 +310,7 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
         """
 
         //TabletId,ReplicaId,BackendId,SchemaHash,Version,LstSuccessVersion,LstFailedVersion,LstFailedTime,LocalDataSize,RemoteDataSize,RowCount,State,LstConsistencyCheckTime,CheckVersion,VersionCount,PathHash,MetaUrl,CompactionStatus
-        String[][] tablets = sql """ show tablets from ${tableName}; """
+        def tablets = sql_return_maparray """ show tablets from ${tableName}; """
 
         run_test.call(tablets)
 
@@ -296,12 +340,15 @@ suite("test_index_compaction_failure_injection", "nonConcurrent") {
             );
         """
 
-        tablets = sql """ show tablets from ${tableName}; """
+        tablets = sql_return_maparray """ show tablets from ${tableName}; """
         run_test.call(tablets)
 
     } finally {
         if (has_update_be_config) {
             set_be_config.call("inverted_index_compaction_enable", invertedIndexCompactionEnable.toString())
+            if (isCloudMode) {
+                set_be_config.call("disable_auto_compaction", disableAutoCompaction.toString())
+            }
         }
     }
 }

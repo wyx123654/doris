@@ -110,6 +110,16 @@
             "ignore_above": 256
           }
         }
+      },
+      "my_wildcard": {
+        "type": "wildcard"
+      },
+      "level": {
+        "type": "constant_keyword",
+        "value": "debug"
+      },
+      "c_user": {
+        "type": "nested"
       }
     }
   }

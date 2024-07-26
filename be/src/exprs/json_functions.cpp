@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "common/compiler_util.h" // IWYU pragma: keep
+#include "common/exception.h"
 #include "common/logging.h"
 
 namespace doris {
@@ -213,10 +214,14 @@ void JsonFunctions::parse_json_paths(const std::string& path_string,
     //    '$.text#abc.xyz'  ->  [$, text#abc, xyz]
     //    '$."text.abc".xyz'  ->  [$, text.abc, xyz]
     //    '$."text.abc"[1].xyz'  ->  [$, text.abc[1], xyz]
-    boost::tokenizer<boost::escaped_list_separator<char>> tok(
-            path_string, boost::escaped_list_separator<char>("\\", ".", "\""));
-    std::vector<std::string> paths(tok.begin(), tok.end());
-    get_parsed_paths(paths, parsed_paths);
+    try {
+        boost::tokenizer<boost::escaped_list_separator<char>> tok(
+                path_string, boost::escaped_list_separator<char>("\\", ".", "\""));
+        std::vector<std::string> paths(tok.begin(), tok.end());
+        get_parsed_paths(paths, parsed_paths);
+    } catch (const boost::escaped_list_error& err) {
+        throw doris::Exception(ErrorCode::INVALID_JSON_PATH, "meet error {}", err.what());
+    }
 }
 
 void JsonFunctions::get_parsed_paths(const std::vector<std::string>& path_exprs,
@@ -261,7 +266,7 @@ Status JsonFunctions::extract_from_object(simdjson::ondemand::object& obj,
         const std::string& _msg = msg;                                                      \
         if (UNLIKELY(_err)) {                                                               \
             if (_err == simdjson::NO_SUCH_FIELD || _err == simdjson::INDEX_OUT_OF_BOUNDS) { \
-                return Status::DataQualityError(                                            \
+                return Status::NotFound<false>(                                             \
                         fmt::format("Not found target filed, err: {}, msg: {}",             \
                                     simdjson::error_message(_err), _msg));                  \
             }                                                                               \
@@ -330,10 +335,12 @@ void JsonFunctions::merge_objects(rapidjson::Value& dst_object, rapidjson::Value
     if (!src_object.IsObject()) {
         return;
     }
+    VLOG_DEBUG << "merge from src: " << print_json_value(src_object)
+               << ", to: " << print_json_value(dst_object);
     for (auto src_it = src_object.MemberBegin(); src_it != src_object.MemberEnd(); ++src_it) {
         auto dst_it = dst_object.FindMember(src_it->name);
         if (dst_it != dst_object.MemberEnd()) {
-            if (src_it->value.IsObject()) {
+            if (src_it->value.IsObject() && dst_it->value.IsObject()) {
                 merge_objects(dst_it->value, src_it->value, allocator);
             } else {
                 if (dst_it->value.IsNull()) {

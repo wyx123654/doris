@@ -200,7 +200,7 @@ public:
                       AggregateFunctionNullUnaryInline<NestFuction, result_is_nullable>>(
                       nested_function_, arguments) {}
 
-    void add(AggregateDataPtr __restrict place, const IColumn** columns, size_t row_num,
+    void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena* arena) const override {
         const ColumnNullable* column = assert_cast<const ColumnNullable*>(columns[0]);
         if (!column->is_null_at(row_num)) {
@@ -286,12 +286,14 @@ public:
                       nested_function_, arguments),
               number_of_arguments(arguments.size()) {
         if (number_of_arguments == 1) {
-            LOG(FATAL)
-                    << "Logical error: single argument is passed to AggregateFunctionNullVariadic";
+            throw doris::Exception(
+                    ErrorCode::INTERNAL_ERROR,
+                    "Logical error: single argument is passed to AggregateFunctionNullVariadic");
         }
 
         if (number_of_arguments > MAX_ARGS) {
-            LOG(FATAL) << fmt::format(
+            throw doris::Exception(
+                    ErrorCode::INTERNAL_ERROR,
                     "Maximum number of arguments for aggregate function with Nullable types is {}",
                     size_t(MAX_ARGS));
         }
@@ -301,15 +303,14 @@ public:
         }
     }
 
-    void add(AggregateDataPtr __restrict place, const IColumn** columns, size_t row_num,
+    void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena* arena) const override {
         /// This container stores the columns we really pass to the nested function.
-        const IColumn* nested_columns[number_of_arguments];
+        std::vector<const IColumn*> nested_columns(number_of_arguments);
 
         for (size_t i = 0; i < number_of_arguments; ++i) {
             if (is_nullable[i]) {
-                const ColumnNullable& nullable_col =
-                        assert_cast<const ColumnNullable&>(*columns[i]);
+                const auto& nullable_col = assert_cast<const ColumnNullable&>(*columns[i]);
                 if (nullable_col.is_null_at(row_num)) {
                     /// If at least one column has a null value in the current row,
                     /// we don't process this row.
@@ -322,7 +323,8 @@ public:
         }
 
         this->set_flag(place);
-        this->nested_function->add(this->nested_place(place), nested_columns, row_num, arena);
+        this->nested_function->add(this->nested_place(place), nested_columns.data(), row_num,
+                                   arena);
     }
 
     bool allocates_memory_in_arena() const override {

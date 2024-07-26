@@ -325,8 +325,8 @@ void DataTypeMapSerDe::write_one_cell_to_jsonb(const IColumn& column, JsonbWrite
 }
 
 void DataTypeMapSerDe::write_column_to_arrow(const IColumn& column, const NullMap* null_map,
-                                             arrow::ArrayBuilder* array_builder, int start,
-                                             int end) const {
+                                             arrow::ArrayBuilder* array_builder, int start, int end,
+                                             const cctz::time_zone& ctz) const {
     auto& builder = assert_cast<arrow::MapBuilder&>(*array_builder);
     auto& map_column = assert_cast<const ColumnMap&>(column);
     const IColumn& nested_keys_column = map_column.get_keys();
@@ -360,15 +360,15 @@ void DataTypeMapSerDe::write_column_to_arrow(const IColumn& column, const NullMa
             checkArrowStatus(builder.Append(), column.get_name(), array_builder->type()->name());
 
             key_serde->write_column_to_arrow(*key_mutable_data, nullptr, key_builder, 0,
-                                             key_mutable_data->size());
+                                             key_mutable_data->size(), ctz);
             value_serde->write_column_to_arrow(*value_mutable_data, nullptr, value_builder, 0,
-                                               value_mutable_data->size());
+                                               value_mutable_data->size(), ctz);
         } else {
             checkArrowStatus(builder.Append(), column.get_name(), array_builder->type()->name());
             key_serde->write_column_to_arrow(nested_keys_column, nullptr, key_builder,
-                                             offsets[r - 1], offsets[r]);
+                                             offsets[r - 1], offsets[r], ctz);
             value_serde->write_column_to_arrow(nested_values_column, nullptr, value_builder,
-                                               offsets[r - 1], offsets[r]);
+                                               offsets[r - 1], offsets[r], ctz);
         }
     }
 }
@@ -397,7 +397,8 @@ void DataTypeMapSerDe::read_column_from_arrow(IColumn& column, const arrow::Arra
 template <bool is_binary_format>
 Status DataTypeMapSerDe::_write_column_to_mysql(const IColumn& column,
                                                 MysqlRowBuffer<is_binary_format>& result,
-                                                int row_idx, bool col_const) const {
+                                                int row_idx, bool col_const,
+                                                const FormatOptions& options) const {
     auto& map_column = assert_cast<const ColumnMap&>(column);
     const IColumn& nested_keys_column = map_column.get_keys();
     const IColumn& nested_values_column = map_column.get_values();
@@ -417,46 +418,44 @@ Status DataTypeMapSerDe::_write_column_to_mysql(const IColumn& column,
             }
         }
         if (nested_keys_column.is_null_at(j)) {
-            if (0 != result.push_string(NULL_IN_COMPLEX_TYPE.c_str(),
-                                        strlen(NULL_IN_COMPLEX_TYPE.c_str()))) {
+            if (0 != result.push_string(options.null_format, options.null_len)) {
                 return Status::InternalError("pack mysql buffer failed.");
             }
         } else {
-            if (is_key_string) {
-                if (0 != result.push_string("\"", 1)) {
+            if (is_key_string && options.wrapper_len > 0) {
+                if (0 != result.push_string(options.nested_string_wrapper, options.wrapper_len)) {
                     return Status::InternalError("pack mysql buffer failed.");
                 }
-                RETURN_IF_ERROR(
-                        key_serde->write_column_to_mysql(nested_keys_column, result, j, false));
-                if (0 != result.push_string("\"", 1)) {
+                RETURN_IF_ERROR(key_serde->write_column_to_mysql(nested_keys_column, result, j,
+                                                                 false, options));
+                if (0 != result.push_string(options.nested_string_wrapper, options.wrapper_len)) {
                     return Status::InternalError("pack mysql buffer failed.");
                 }
             } else {
-                RETURN_IF_ERROR(
-                        key_serde->write_column_to_mysql(nested_keys_column, result, j, false));
+                RETURN_IF_ERROR(key_serde->write_column_to_mysql(nested_keys_column, result, j,
+                                                                 false, options));
             }
         }
-        if (0 != result.push_string(":", 1)) {
+        if (0 != result.push_string(&options.map_key_delim, 1)) {
             return Status::InternalError("pack mysql buffer failed.");
         }
         if (nested_values_column.is_null_at(j)) {
-            if (0 != result.push_string(NULL_IN_COMPLEX_TYPE.c_str(),
-                                        strlen(NULL_IN_COMPLEX_TYPE.c_str()))) {
+            if (0 != result.push_string(options.null_format, options.null_len)) {
                 return Status::InternalError("pack mysql buffer failed.");
             }
         } else {
-            if (is_val_string) {
-                if (0 != result.push_string("\"", 1)) {
+            if (is_val_string && options.wrapper_len > 0) {
+                if (0 != result.push_string(options.nested_string_wrapper, options.wrapper_len)) {
                     return Status::InternalError("pack mysql buffer failed.");
                 }
-                RETURN_IF_ERROR(
-                        value_serde->write_column_to_mysql(nested_values_column, result, j, false));
-                if (0 != result.push_string("\"", 1)) {
+                RETURN_IF_ERROR(value_serde->write_column_to_mysql(nested_values_column, result, j,
+                                                                   false, options));
+                if (0 != result.push_string(options.nested_string_wrapper, options.wrapper_len)) {
                     return Status::InternalError("pack mysql buffer failed.");
                 }
             } else {
-                RETURN_IF_ERROR(
-                        value_serde->write_column_to_mysql(nested_values_column, result, j, false));
+                RETURN_IF_ERROR(value_serde->write_column_to_mysql(nested_values_column, result, j,
+                                                                   false, options));
             }
         }
     }
@@ -469,14 +468,14 @@ Status DataTypeMapSerDe::_write_column_to_mysql(const IColumn& column,
 
 Status DataTypeMapSerDe::write_column_to_mysql(const IColumn& column,
                                                MysqlRowBuffer<true>& row_buffer, int row_idx,
-                                               bool col_const) const {
-    return _write_column_to_mysql(column, row_buffer, row_idx, col_const);
+                                               bool col_const, const FormatOptions& options) const {
+    return _write_column_to_mysql(column, row_buffer, row_idx, col_const, options);
 }
 
 Status DataTypeMapSerDe::write_column_to_mysql(const IColumn& column,
                                                MysqlRowBuffer<false>& row_buffer, int row_idx,
-                                               bool col_const) const {
-    return _write_column_to_mysql(column, row_buffer, row_idx, col_const);
+                                               bool col_const, const FormatOptions& options) const {
+    return _write_column_to_mysql(column, row_buffer, row_idx, col_const, options);
 }
 
 Status DataTypeMapSerDe::write_column_to_orc(const std::string& timezone, const IColumn& column,
@@ -507,6 +506,43 @@ Status DataTypeMapSerDe::write_column_to_orc(const std::string& timezone, const 
     cur_batch->elements->numElements = nested_values_column.size();
 
     cur_batch->numElements = end - start;
+    return Status::OK();
+}
+
+Status DataTypeMapSerDe::write_column_to_pb(const IColumn& column, PValues& result, int start,
+                                            int end) const {
+    const auto& map_column = assert_cast<const ColumnMap&>(column);
+    auto* ptype = result.mutable_type();
+    ptype->set_id(PGenericType::MAP);
+    const ColumnArray::Offsets64& offsets = map_column.get_offsets();
+    const IColumn& nested_keys_column = map_column.get_keys();
+    const IColumn& nested_values_column = map_column.get_values();
+    auto* key_child_element = result.add_child_element();
+    auto* value_child_element = result.add_child_element();
+    for (size_t row_id = start; row_id < end; row_id++) {
+        size_t offset = offsets[row_id - 1];
+        size_t next_offset = offsets[row_id];
+        result.add_child_offset(next_offset);
+        RETURN_IF_ERROR(key_serde->write_column_to_pb(nested_keys_column, *key_child_element,
+                                                      offset, next_offset));
+        RETURN_IF_ERROR(value_serde->write_column_to_pb(nested_values_column, *value_child_element,
+                                                        offset, next_offset));
+    }
+    return Status::OK();
+}
+
+Status DataTypeMapSerDe::read_column_from_pb(IColumn& column, const PValues& arg) const {
+    auto& map_column = assert_cast<ColumnMap&>(column);
+    auto& offsets = map_column.get_offsets();
+    auto& key_column = map_column.get_keys();
+    auto& value_column = map_column.get_values();
+    for (int i = 0; i < arg.child_offset_size(); ++i) {
+        offsets.emplace_back(arg.child_offset(i));
+    }
+    for (int i = 0; i < arg.child_element_size(); i = i + 2) {
+        RETURN_IF_ERROR(key_serde->read_column_from_pb(key_column, arg.child_element(i)));
+        RETURN_IF_ERROR(value_serde->read_column_from_pb(value_column, arg.child_element(i + 1)));
+    }
     return Status::OK();
 }
 

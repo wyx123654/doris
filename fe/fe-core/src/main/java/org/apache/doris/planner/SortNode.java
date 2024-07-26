@@ -34,6 +34,7 @@ import org.apache.doris.statistics.StatsRecursiveDerive;
 import org.apache.doris.thrift.TExplainLevel;
 import org.apache.doris.thrift.TPlanNode;
 import org.apache.doris.thrift.TPlanNodeType;
+import org.apache.doris.thrift.TSortAlgorithm;
 import org.apache.doris.thrift.TSortInfo;
 import org.apache.doris.thrift.TSortNode;
 
@@ -61,8 +62,9 @@ public class SortNode extends PlanNode {
     List<Expr> resolvedTupleExprs;
     private final SortInfo info;
     private final boolean  useTopN;
-    private boolean useTopnOpt;
+    private boolean useTopnOpt = false;
     private boolean useTwoPhaseReadOpt;
+    private boolean hasRuntimePredicate = false;
 
     // If mergeByexchange is set to true, the sort information is pushed to the
     // exchange node, and the sort node is used for the ORDER BY .
@@ -225,7 +227,9 @@ public class SortNode extends PlanNode {
                 cardinality = Math.min(cardinality, limit);
             }
         }
-        LOG.debug("stats Sort: cardinality=" + Double.toString(cardinality));
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("stats Sort: cardinality=" + Double.toString(cardinality));
+        }
     }
 
     public void init(Analyzer analyzer) throws UserException {
@@ -321,6 +325,19 @@ public class SortNode extends PlanNode {
         msg.sort_node.setMergeByExchange(this.mergeByexchange);
         msg.sort_node.setIsAnalyticSort(isAnalyticSort);
         msg.sort_node.setIsColocate(isColocate);
+
+        boolean isFixedLength = info.getOrderingExprs().stream().allMatch(e -> !e.getType().isStringType()
+                && !e.getType().isCollectionType());
+        TSortAlgorithm algorithm;
+        if (limit > 0 && limit + offset < 1024 && (useTwoPhaseReadOpt || hasRuntimePredicate
+                || isFixedLength)) {
+            algorithm = TSortAlgorithm.HEAP_SORT;
+        } else if (limit > 0 && !isFixedLength && limit + offset < 256) {
+            algorithm = TSortAlgorithm.TOPN_SORT;
+        } else {
+            algorithm = TSortAlgorithm.FULL_SORT;
+        }
+        msg.sort_node.setAlgorithm(algorithm);
     }
 
     @Override
@@ -345,5 +362,9 @@ public class SortNode extends PlanNode {
 
     public void setColocate(boolean colocate) {
         isColocate = colocate;
+    }
+
+    public void setHasRuntimePredicate() {
+        this.hasRuntimePredicate = true;
     }
 }

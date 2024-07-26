@@ -17,9 +17,13 @@
 
 package org.apache.doris.regression
 
+import ch.qos.logback.classic.PatternLayout
+import ch.qos.logback.core.OutputStreamAppender
 import com.google.common.collect.Lists
 import groovy.transform.CompileStatic
 import jodd.util.Wildcard
+import org.apache.doris.regression.logger.TeamcityServiceMessageEncoder
+import org.apache.doris.regression.suite.Suite
 import org.apache.doris.regression.suite.event.EventListener
 import org.apache.doris.regression.suite.GroovyFileSource
 import org.apache.doris.regression.suite.ScriptContext
@@ -35,6 +39,8 @@ import groovy.util.logging.Slf4j
 import org.apache.commons.cli.*
 import org.apache.commons.lang3.concurrent.BasicThreadFactory;
 import org.codehaus.groovy.control.CompilerConfiguration
+import org.codehaus.groovy.vmplugin.v8.IndyInterface
+import org.slf4j.LoggerFactory
 
 import java.beans.Introspector
 import java.util.concurrent.Executors
@@ -57,6 +63,19 @@ class RegressionTest {
     static final int cleanLoadedClassesThreshold = 20
     static String nonConcurrentTestGroup = "nonConcurrent"
 
+    static {
+        ch.qos.logback.classic.Logger loggerOfSuite =
+                LoggerFactory.getLogger(Suite.class) as ch.qos.logback.classic.Logger
+        def context = loggerOfSuite.getLoggerContext()
+        def frameworkPackages = context.getFrameworkPackages()
+
+        // don't print this class name as the log class name
+        frameworkPackages.add(TeamcityServiceMessageEncoder.class.getPackage().getName())
+        frameworkPackages.add(IndyInterface.class.getPackage().getName())
+        frameworkPackages.add(OutputStreamAppender.class.getPackage().getName())
+        frameworkPackages.add(PatternLayout.class.getPackage().getName())
+    }
+
     static void main(String[] args) {
         CommandLine cmd = ConfigOptions.initCommands(args)
         if (cmd == null) {
@@ -76,6 +95,10 @@ class RegressionTest {
             log.info("=== run ${i} time ===")
             if (config.times > 1) {
                 TeamcityUtils.postfix = i.toString()
+            }
+
+            if (config.caseNamePrefix) {
+                TeamcityUtils.prefix = config.caseNamePrefix.toString()
             }
 
             Recorder recorder = runScripts(config)
@@ -150,13 +173,28 @@ class RegressionTest {
             }
         }
 
+        /*
+         * support run a specific case after all other cases run.
+         * if a nonConcurrent case, with name String case_name_check_before_quit = "check_before_quit.groovy", we could make sure it run at last.
+         */
+        String case_name_check_before_quit = "check_before_quit.groovy"
+        File check_before_quit = null
+
         // 2. collect groovy sources.
         rootFile.eachFileRecurse { f ->
             if (f.isFile() && f.name.endsWith('.groovy') && fileFilter.test(f.name)
                     && directoryFilter.test(f.getParent())) {
-                sources.add(new GroovyFileSource(f))
+                if (f.name.equals(case_name_check_before_quit)) {
+                    check_before_quit = f;
+                } else {
+                    sources.add(new GroovyFileSource(f))
+                }
             }
         }
+        if (check_before_quit != null) {
+            sources.add(new GroovyFileSource(check_before_quit))
+        }
+
         return sources
     }
 
@@ -241,6 +279,7 @@ class RegressionTest {
     static Recorder runScripts(Config config) {
         def recorder = new Recorder()
         def directoryFilter = config.getDirectoryFilter()
+        log.info("run scripts in directories: " + config.directories)
         if (!config.withOutLoadData) {
             log.info('Start to run load scripts')
             runScripts(config, recorder, directoryFilter,

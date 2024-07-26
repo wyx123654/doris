@@ -113,7 +113,7 @@ public class SessionVariablesTest extends TestWithFeService {
         Assert.assertNotEquals(sessionVar.isEnableBucketShuffleJoin(), bucketShuffle);
 
         // 4. set experimental for none experimental var
-        sql = "set experimental_repeat_max_num=5";
+        sql = "set experimental_group_concat_max_len=5";
         setStmt = (SetStmt) parseAndAnalyzeStmt(sql, connectContext);
         SetExecutor setExecutor2 = new SetExecutor(connectContext, setStmt);
         ExceptionChecker.expectThrowsWithMsg(DdlException.class, "Unknown system variable",
@@ -155,5 +155,17 @@ public class SessionVariablesTest extends TestWithFeService {
         sessionVariable.setForwardedSessionVariables(queryOptions);
         Assertions.assertEquals(123, sessionVariable.getQueryTimeoutS());
         Assertions.assertEquals(123, sessionVariable.getInsertTimeoutS());
+    }
+
+    @Test
+    public void testCloneSessionVariablesWithSessionOriginValueNotEmpty() throws NoSuchFieldException {
+        Field txIsolation = SessionVariable.class.getField("txIsolation");
+        SessionVariableField txIsolationSessionVariableField = new SessionVariableField(txIsolation);
+        sessionVariable.addSessionOriginValue(txIsolationSessionVariableField, "test");
+
+        SessionVariable sessionVariableClone = VariableMgr.cloneSessionVariable(sessionVariable);
+
+        Assertions.assertEquals("test",
+                sessionVariableClone.getSessionOriginValue().get(txIsolationSessionVariableField));
     }
 }

@@ -66,7 +66,7 @@ public class ShowBackupStmtTest {
         AtomicBoolean privilege = new AtomicBoolean(true);
         new MockUp<AccessControllerManager>() {
             @Mock
-            public boolean checkDbPriv(ConnectContext ctx, String qualifiedDb, PrivPredicate wanted) {
+            public boolean checkDbPriv(ConnectContext ctx, String ctl, String qualifiedDb, PrivPredicate wanted) {
                 return privilege.get();
             }
         };
@@ -78,7 +78,7 @@ public class ShowBackupStmtTest {
                 new BinaryPredicate(BinaryPredicate.Operator.EQ, new SlotRef(new TableName("a.b.c"), "snapshotname"),
                         new StringLiteral("FINISHED")));
         stmt.analyze(analyzer);
-        Assertions.assertEquals(stmt.toSql(), "SHOW BACKUP WHERE `a`.`b`.`c`.`snapshotname` = 'FINISHED'");
+        Assertions.assertEquals(stmt.toSql(), "SHOW BACKUP WHERE (`a`.`b`.`c`.`snapshotname` = 'FINISHED')");
 
         stmt = new ShowBackupStmt("",
                 new LikePredicate(Operator.LIKE, new SlotRef(new TableName("a.b.c"), "snapshotname"),

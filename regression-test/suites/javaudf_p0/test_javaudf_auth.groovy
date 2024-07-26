@@ -23,6 +23,7 @@ import java.nio.file.Paths
 
 suite("test_javaudf_auth") {
     def jarPath = """${context.file.parent}/jars/java-udf-case-jar-with-dependencies.jar"""
+    scp_udf_file_to_all_be(jarPath)
     log.info("Jar path: ${jarPath}".toString())
     File path = new File(jarPath)
     if (!path.exists()) {
@@ -42,6 +43,14 @@ suite("test_javaudf_auth") {
 
     sql """CREATE USER '${user}' IDENTIFIED BY '${pwd}'"""
     sql """CREATE DATABASE ${dbName}"""
+    
+    //cloud-mode
+    if (isCloudMode()) {
+        def clusters = sql " SHOW CLUSTERS; "
+        assertTrue(!clusters.isEmpty())
+        def validCluster = clusters[0][0]
+        sql """GRANT USAGE_PRIV ON CLUSTER ${validCluster} TO ${user}""";
+    }    
 
     sql """USE ${dbName}"""
     sql """ CREATE FUNCTION java_udf_auth_test(int) RETURNS int PROPERTIES (

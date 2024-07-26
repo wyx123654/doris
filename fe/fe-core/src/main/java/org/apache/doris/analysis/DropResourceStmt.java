@@ -52,7 +52,7 @@ public class DropResourceStmt extends DdlStmt {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 
-        FeNameFormat.checkResourceName(resourceName);
+        FeNameFormat.checkResourceName(resourceName, ResourceTypeEnum.GENERAL);
     }
 
     @Override
@@ -61,5 +61,10 @@ public class DropResourceStmt extends DdlStmt {
         sb.append("DROP ");
         sb.append("RESOURCE `").append(resourceName).append("`");
         return sb.toString();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.DROP;
     }
 }

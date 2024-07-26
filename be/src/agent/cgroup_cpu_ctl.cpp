@@ -22,20 +22,22 @@
 
 #include <filesystem>
 
+#include "util/defer_op.h"
+
 namespace doris {
 
 Status CgroupCpuCtl::init() {
     _doris_cgroup_cpu_path = config::doris_cgroup_cpu_path;
     if (_doris_cgroup_cpu_path.empty()) {
         LOG(INFO) << "doris cgroup cpu path is not specify, path=" << _doris_cgroup_cpu_path;
-        return Status::InternalError<false>("doris cgroup cpu path {} is not specify.",
-                                            _doris_cgroup_cpu_path);
+        return Status::InvalidArgument<false>("doris cgroup cpu path {} is not specify.",
+                                              _doris_cgroup_cpu_path);
     }
 
     if (access(_doris_cgroup_cpu_path.c_str(), F_OK) != 0) {
         LOG(INFO) << "doris cgroup cpu path not exists, path=" << _doris_cgroup_cpu_path;
-        return Status::InternalError<false>("doris cgroup cpu path {} not exists.",
-                                            _doris_cgroup_cpu_path);
+        return Status::InvalidArgument<false>("doris cgroup cpu path {} not exists.",
+                                              _doris_cgroup_cpu_path);
     }
 
     if (_doris_cgroup_cpu_path.back() != '/') {
@@ -84,6 +86,12 @@ Status CgroupCpuCtl::write_cg_sys_file(std::string file_path, int value, std::st
         return Status::InternalError<false>("open path failed, path={}", file_path);
     }
 
+    Defer defer {[&]() {
+        if (-1 == ::close(fd)) {
+            LOG(INFO) << "close file fd failed";
+        }
+    }};
+
     auto str = fmt::format("{}\n", value);
     int ret = write(fd, str.c_str(), str.size());
     if (ret == -1) {
@@ -122,9 +130,9 @@ Status CgroupV1CpuCtl::init() {
         return Status::InternalError<false>("invalid cgroup path, not find cpu quota file");
     }
 
-    if (_tg_id == -1) {
+    if (_wg_id == -1) {
         // means current cgroup cpu ctl is just used to clear dir,
-        // it does not contains task group.
+        // it does not contains workload group.
         // todo(wb) rethinking whether need to refactor cgroup_cpu_ctl
         _init_succ = true;
         LOG(INFO) << "init cgroup cpu query path succ, path=" << _cgroup_v1_cpu_query_path;
@@ -132,7 +140,7 @@ Status CgroupV1CpuCtl::init() {
     }
 
     // workload group path
-    _cgroup_v1_cpu_tg_path = _cgroup_v1_cpu_query_path + "/" + std::to_string(_tg_id);
+    _cgroup_v1_cpu_tg_path = _cgroup_v1_cpu_query_path + "/" + std::to_string(_wg_id);
     if (access(_cgroup_v1_cpu_tg_path.c_str(), F_OK) != 0) {
         int ret = mkdir(_cgroup_v1_cpu_tg_path.c_str(), S_IRWXU);
         if (ret != 0) {
@@ -164,7 +172,7 @@ Status CgroupV1CpuCtl::modify_cg_cpu_soft_limit_no_lock(int cpu_shares) {
 
 Status CgroupV1CpuCtl::modify_cg_cpu_hard_limit_no_lock(int cpu_hard_limit) {
     int val = cpu_hard_limit > 0 ? (_cpu_cfs_period_us * _cpu_core_num * cpu_hard_limit / 100)
-                                 : CPU_HARD_LIMIT_DEFAULT_VALUE;
+                                 : CGROUP_CPU_HARD_LIMIT_DEFAULT_VALUE;
     std::string msg = "modify cpu quota value to " + std::to_string(val);
     return CgroupCpuCtl::write_cg_sys_file(_cgroup_v1_cpu_tg_quota_file, val, msg, false);
 }
@@ -178,7 +186,8 @@ Status CgroupV1CpuCtl::add_thread_to_cgroup() {
     return Status::OK();
 #else
     int tid = static_cast<int>(syscall(SYS_gettid));
-    std::string msg = "add thread " + std::to_string(tid) + " to group";
+    std::string msg =
+            "add thread " + std::to_string(tid) + " to group" + " " + std::to_string(_wg_id);
     std::lock_guard<std::shared_mutex> w_lock(_lock_mutex);
     return CgroupCpuCtl::write_cg_sys_file(_cgroup_v1_cpu_tg_task_file, tid, msg, true);
 #endif

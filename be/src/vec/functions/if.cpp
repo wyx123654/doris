@@ -118,7 +118,8 @@ template <typename A, typename B>
 struct NumIfImpl<A, B, NumberTraits::Error> {
 private:
     [[noreturn]] static void throw_error() {
-        LOG(FATAL) << "Internal logic error: invalid types of arguments 2 and 3 of if";
+        throw doris::Exception(ErrorCode::INTERNAL_ERROR,
+                               "Internal logic error: invalid types of arguments 2 and 3 of if");
         __builtin_unreachable();
     }
 
@@ -185,11 +186,6 @@ public:
 
     size_t get_number_of_arguments() const override { return 3; }
     bool use_default_implementation_for_nulls() const override { return false; }
-    ColumnNumbers get_arguments_that_dont_imply_nullable_return_type(
-            size_t /*number_of_arguments*/) const override {
-        return {0};
-    }
-
     DataTypePtr get_return_type_impl(const DataTypes& arguments) const override {
         // if return type is custom, one of nullable return type will be nullable
         bool nullable = arguments[1]->is_nullable() || arguments[2]->is_nullable();

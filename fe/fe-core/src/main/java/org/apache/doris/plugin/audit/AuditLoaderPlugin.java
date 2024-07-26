@@ -34,11 +34,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
-import java.nio.charset.Charset;
-import java.nio.charset.CharsetDecoder;
-import java.nio.charset.CodingErrorAction;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.BlockingQueue;
@@ -109,7 +104,9 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
             try {
                 loadThread.join();
             } catch (InterruptedException e) {
-                LOG.debug("encounter exception when closing the audit loader", e);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("encounter exception when closing the audit loader", e);
+                }
             }
         }
     }
@@ -120,7 +117,9 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
 
     public void exec(AuditEvent event) {
         if (!GlobalVariable.enableAuditLoader) {
-            LOG.debug("builtin audit loader is disabled, discard current audit event");
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("builtin audit loader is disabled, discard current audit event");
+            }
             return;
         }
         try {
@@ -130,8 +129,10 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
             // discard the current audit_event. If this problem occurs frequently,
             // improvement can be considered.
             ++discardLogNum;
-            LOG.debug("encounter exception when putting current audit batch, discard current audit event."
-                    + " total discard num: {}", discardLogNum, e);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("encounter exception when putting current audit batch, discard current audit event."
+                        + " total discard num: {}", discardLogNum, e);
+            }
         }
     }
 
@@ -142,7 +143,7 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
 
     private void fillLogBuffer(AuditEvent event, StringBuilder logBuffer) {
         logBuffer.append(event.queryId).append("\t");
-        logBuffer.append(TimeUtils.longToTimeString(event.timestamp)).append("\t");
+        logBuffer.append(TimeUtils.longToTimeStringWithms(event.timestamp)).append("\t");
         logBuffer.append(event.clientIp).append("\t");
         logBuffer.append(event.user).append("\t");
         logBuffer.append(event.ctl).append("\t");
@@ -155,35 +156,20 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
         logBuffer.append(event.scanRows).append("\t");
         logBuffer.append(event.returnRows).append("\t");
         logBuffer.append(event.stmtId).append("\t");
+        logBuffer.append(event.stmtType).append("\t");
         logBuffer.append(event.isQuery ? 1 : 0).append("\t");
         logBuffer.append(event.feIp).append("\t");
         logBuffer.append(event.cpuTimeMs).append("\t");
         logBuffer.append(event.sqlHash).append("\t");
         logBuffer.append(event.sqlDigest).append("\t");
         logBuffer.append(event.peakMemoryBytes).append("\t");
-        // trim the query to avoid too long
-        // use `getBytes().length` to get real byte length
-        String stmt = truncateByBytes(event.stmt).replace("\n", " ")
-                .replace("\t", " ")
-                .replace("\r", " ");
-        LOG.debug("receive audit event with stmt: {}", stmt);
-        logBuffer.append(stmt).append("\n");
-    }
-
-    private String truncateByBytes(String str) {
-        int maxLen = Math.min(GlobalVariable.auditPluginMaxSqlLength, str.getBytes().length);
-        if (maxLen >= str.getBytes().length) {
-            return str;
+        logBuffer.append(event.workloadGroup).append("\t");
+        // already trim the query in org.apache.doris.qe.AuditLogHelper#logAuditLog
+        String stmt = event.stmt;
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("receive audit event with stmt: {}", stmt);
         }
-        Charset utf8Charset = Charset.forName("UTF-8");
-        CharsetDecoder decoder = utf8Charset.newDecoder();
-        byte[] sb = str.getBytes();
-        ByteBuffer buffer = ByteBuffer.wrap(sb, 0, maxLen);
-        CharBuffer charBuffer = CharBuffer.allocate(maxLen);
-        decoder.onMalformedInput(CodingErrorAction.IGNORE);
-        decoder.decode(buffer, charBuffer, true);
-        decoder.flush(charBuffer);
-        return new String(charBuffer.array(), 0, charBuffer.position());
+        logBuffer.append(stmt).append("\n");
     }
 
     private void loadIfNecessary(AuditStreamLoader loader) {
@@ -203,9 +189,13 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
                     return;
                 }
                 AuditStreamLoader.LoadResponse response = loader.loadBatch(auditLogBuffer, token);
-                LOG.debug("audit loader response: {}", response);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("audit loader response: {}", response);
+                }
             } catch (Exception e) {
-                LOG.debug("encounter exception when putting current audit batch, discard current batch", e);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("encounter exception when putting current audit batch, discard current batch", e);
+                }
                 discardLogNum += auditLogNum;
             } finally {
                 // make a new string builder to receive following events.
@@ -215,8 +205,6 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
                 }
             }
         }
-
-        return;
     }
 
     private void resetBatch(long currentTime) {
@@ -242,7 +230,9 @@ public class AuditLoaderPlugin extends Plugin implements AuditPlugin {
                         loadIfNecessary(loader);
                     }
                 } catch (InterruptedException ie) {
-                    LOG.debug("encounter exception when loading current audit batch", ie);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("encounter exception when loading current audit batch", ie);
+                    }
                 } catch (Exception e) {
                     LOG.error("run audit logger error:", e);
                 }

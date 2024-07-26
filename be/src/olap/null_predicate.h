@@ -52,12 +52,9 @@ public:
     Status evaluate(BitmapIndexIterator* iterator, uint32_t num_rows,
                     roaring::Roaring* roaring) const override;
 
-    Status evaluate(const vectorized::NameAndTypePair& name_with_type,
+    Status evaluate(const vectorized::IndexFieldNameAndTypePair& name_with_type,
                     InvertedIndexIterator* iterator, uint32_t num_rows,
                     roaring::Roaring* bitmap) const override;
-
-    uint16_t evaluate(const vectorized::IColumn& column, uint16_t* sel,
-                      uint16_t size) const override;
 
     void evaluate_or(const vectorized::IColumn& column, const uint16_t* sel, uint16_t size,
                      bool* flags) const override;
@@ -105,6 +102,9 @@ public:
     void evaluate_vec(const vectorized::IColumn& column, uint16_t size, bool* flags) const override;
 
 private:
+    uint16_t _evaluate_inner(const vectorized::IColumn& column, uint16_t* sel,
+                             uint16_t size) const override;
+
     std::string _debug_string() const override {
         std::string info = "NullPredicate(" + std::string(_is_null ? "is_null" : "not_null") + ")";
         return info;

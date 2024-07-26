@@ -19,6 +19,7 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.InfoSchemaDb;
+import org.apache.doris.catalog.MysqlDb;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -79,6 +80,11 @@ public class RefreshDbStmt extends DdlStmt {
             ErrorReport.reportAnalysisException(
                     ErrorCode.ERR_DBACCESS_DENIED_ERROR, analyzer.getQualifiedUser(), dbName);
         }
+        // Don't allow dropping 'mysql' database
+        if (dbName.equalsIgnoreCase(MysqlDb.DATABASE_NAME)) {
+            ErrorReport.reportAnalysisException(
+                    ErrorCode.ERR_DBACCESS_DENIED_ERROR, analyzer.getQualifiedUser(), dbName);
+        }
         // check access
         if (!Env.getCurrentEnv().getAccessManager().checkDbPriv(ConnectContext.get(), catalogName,
                 dbName, PrivPredicate.DROP)) {
@@ -109,5 +115,10 @@ public class RefreshDbStmt extends DdlStmt {
     @Override
     public String toString() {
         return toSql();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.REFRESH;
     }
 }

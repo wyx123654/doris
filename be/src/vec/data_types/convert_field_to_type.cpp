@@ -43,13 +43,6 @@
 #include "vec/data_types/data_type_array.h"
 #include "vec/data_types/data_type_nullable.h"
 
-namespace doris {
-namespace vectorized {
-struct UInt128;
-} // namespace vectorized
-} // namespace doris
-
-// #include "vec/data_types/data_type_tuple.h"
 namespace doris::vectorized {
 /** Checking for a `Field from` of `From` type falls to a range of values of type `To`.
   * `From` and `To` - numeric types. They can be floating-point types.
@@ -117,6 +110,7 @@ public:
     void operator()(const Int128& x, JsonbWriter* writer) const {
         writer->writeInt128(int128_t(x));
     }
+    void operator()(const IPv6& x, JsonbWriter* writer) const { writer->writeInt128(int128_t(x)); }
     void operator()(const Int64& x, JsonbWriter* writer) const { writer->writeInt64(x); }
     void operator()(const Float64& x, JsonbWriter* writer) const { writer->writeDouble(x); }
     void operator()(const String& x, JsonbWriter* writer) const {

@@ -20,6 +20,7 @@ package org.apache.doris.system;
 import org.apache.doris.catalog.DiskInfo;
 import org.apache.doris.catalog.DiskInfo.DiskState;
 import org.apache.doris.catalog.Env;
+import org.apache.doris.cloud.proto.Cloud;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.io.Text;
@@ -93,6 +94,8 @@ public class Backend implements Writable {
     @SerializedName("disksRef")
     private volatile ImmutableMap<String, DiskInfo> disksRef;
 
+    private Long lastPublishTaskAccumulatedNum = 0L;
+
     private String heartbeatErrMsg = "";
 
     // This is used for the first time we init pathHashToDishInfo in SystemInfoService.
@@ -126,7 +129,9 @@ public class Backend implements Writable {
     // cpu cores
     @SerializedName("cpuCores")
     private int cpuCores = 1;
-
+    // The physical memory available for use by BE.
+    @SerializedName("beMemory")
+    private long beMemory = 0;
     // from config::pipeline_executor_size , default equal cpuCores
     @SerializedName("pipelineExecutorSize")
     private int pipelineExecutorSize = 1;
@@ -178,7 +183,7 @@ public class Backend implements Writable {
     }
 
     public String getCloudClusterStatus() {
-        return tagMap.getOrDefault(Tag.CLOUD_CLUSTER_STATUS, "");
+        return tagMap.getOrDefault(Tag.CLOUD_CLUSTER_STATUS, String.valueOf(Cloud.ClusterStatus.UNKNOWN));
     }
 
     public void setCloudClusterStatus(final String clusterStatus) {
@@ -211,6 +216,11 @@ public class Backend implements Writable {
 
     public long getId() {
         return id;
+    }
+
+    // Return ip:heartbeat port
+    public String getAddress() {
+        return host + ":" + heartbeatPort;
     }
 
     public String getHost() {
@@ -271,6 +281,18 @@ public class Backend implements Writable {
 
     public void setLoadDisabled(boolean isLoadDisabled) {
         this.backendStatus.isLoadDisabled = isLoadDisabled;
+    }
+
+    public void setActive(boolean isActive) {
+        this.backendStatus.isActive = isActive;
+    }
+
+    public boolean isActive() {
+        return this.backendStatus.isActive;
+    }
+
+    public long getCurrentFragmentNum() {
+        return this.backendStatus.currentFragmentNum;
     }
 
     // for test only
@@ -362,12 +384,20 @@ public class Backend implements Writable {
         return cpuCores;
     }
 
+    public long getBeMemory() {
+        return beMemory;
+    }
+
     public int getPipelineExecutorSize() {
         return pipelineExecutorSize;
     }
 
     public long getLastMissingHeartbeatTime() {
         return lastMissingHeartbeatTime;
+    }
+
+    public void setLastMissingHeartbeatTime(long lastMissingHeartbeatTime) {
+        this.lastMissingHeartbeatTime = lastMissingHeartbeatTime;
     }
 
     // Backend process epoch, is uesd to tag a beckend process
@@ -604,7 +634,9 @@ public class Backend implements Writable {
                     isChanged = true;
                 }
             }
-            LOG.debug("update disk info. backendId: {}, diskInfo: {}", id, diskInfo.toString());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("update disk info. backendId: {}, diskInfo: {}", id, diskInfo.toString());
+            }
         }
 
         // remove not exist rootPath in backend
@@ -673,7 +705,7 @@ public class Backend implements Writable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(id, host, heartbeatPort, bePort, isAlive);
+        return Objects.hash(id, host, heartbeatPort, bePort, isAlive.get());
     }
 
     @Override
@@ -695,7 +727,7 @@ public class Backend implements Writable {
     public String toString() {
         return "Backend [id=" + id + ", host=" + host + ", heartbeatPort=" + heartbeatPort + ", alive=" + isAlive.get()
                 + ", lastStartTime=" + TimeUtils.longToTimeString(lastStartTime) + ", process epoch=" + lastStartTime
-                + ", tags: " + tagMap + "]";
+                + ", isDecommissioned=" + isDecommissioned + ", tags: " + tagMap + "]";
     }
 
     public String getHealthyStatus() {
@@ -747,6 +779,10 @@ public class Backend implements Writable {
                 isChanged = true;
                 this.nodeRoleTag = Tag.createNotCheck(Tag.TYPE_ROLE, hbResponse.getNodeRole());
             }
+            if (this.beMemory != hbResponse.getBeMemory()) {
+                isChanged = true;
+                this.beMemory = hbResponse.getBeMemory();
+            }
 
             this.lastUpdateMs = hbResponse.getHbTime();
             if (!isAlive.get()) {
@@ -769,6 +805,10 @@ public class Backend implements Writable {
                 this.lastStartTime = hbResponse.getBeStartTime();
                 isChanged = true;
             }
+
+            this.backendStatus.currentFragmentNum = hbResponse.getFragmentNum();
+            this.backendStatus.lastFragmentUpdateTime = hbResponse.getLastFragmentUpdateTime();
+
             heartbeatErrMsg = "";
             this.heartbeatFailureCounter = 0;
         } else {
@@ -824,6 +864,12 @@ public class Backend implements Writable {
         public volatile boolean isQueryDisabled = false;
         @SerializedName("isLoadDisabled")
         public volatile boolean isLoadDisabled = false;
+        @SerializedName("isActive")
+        public volatile boolean isActive = true;
+
+        // cloud mode, cloud control just query master, so not need SerializedName
+        public volatile long currentFragmentNum = 0;
+        public volatile long lastFragmentUpdateTime = 0;
 
         @Override
         public String toString() {
@@ -866,12 +912,24 @@ public class Backend implements Writable {
         return new TNetworkAddress(getHost(), getBrpcPort());
     }
 
+    public TNetworkAddress getHeartbeatAddress() {
+        return new TNetworkAddress(getHost(), getHeartbeatPort());
+    }
+
     public TNetworkAddress getArrowFlightAddress() {
         return new TNetworkAddress(getHost(), getArrowFlightSqlPort());
     }
 
     public String getTagMapString() {
         return "{" + new PrintableMap<>(tagMap, ":", true, false).toString() + "}";
+    }
+
+    public Long getPublishTaskLastTimeAccumulated() {
+        return this.lastPublishTaskAccumulatedNum;
+    }
+
+    public void setPublishTaskLastTimeAccumulated(Long accumulatedNum) {
+        this.lastPublishTaskAccumulatedNum = accumulatedNum;
     }
 
 }

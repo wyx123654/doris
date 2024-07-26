@@ -24,6 +24,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.ThreadPoolManager;
 import org.apache.doris.common.Version;
+import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.common.util.MasterDaemon;
 import org.apache.doris.persist.HbPackage;
 import org.apache.doris.resource.Tag;
@@ -56,6 +57,7 @@ import com.google.common.collect.Maps;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -170,14 +172,21 @@ public class HeartbeatMgr extends MasterDaemon {
                 BackendHbResponse hbResponse = (BackendHbResponse) response;
                 Backend be = nodeMgr.getBackend(hbResponse.getBeId());
                 if (be != null) {
+                    long oldStartTime = be.getLastStartTime();
                     boolean isChanged = be.handleHbResponse(hbResponse, isReplay);
-                    if (hbResponse.getStatus() != HbStatus.OK) {
+                    if (hbResponse.getStatus() == HbStatus.OK) {
+                        long newStartTime = be.getLastStartTime();
+                        if (!isReplay && oldStartTime != newStartTime) {
+                            Env.getCurrentGlobalTransactionMgr().abortTxnWhenCoordinateBeRestart(
+                                    be.getId(), be.getHost(), newStartTime);
+                        }
+                    } else {
                         // invalid all connections cached in ClientPool
                         ClientPool.backendPool.clearPool(new TNetworkAddress(be.getHost(), be.getBePort()));
                         if (!isReplay && System.currentTimeMillis() - be.getLastUpdateMs()
                                 >= Config.abort_txn_after_lost_heartbeat_time_second * 1000L) {
-                            Env.getCurrentGlobalTransactionMgr()
-                                    .abortTxnWhenCoordinateBeDown(be.getHost(), 100);
+                            Env.getCurrentGlobalTransactionMgr().abortTxnWhenCoordinateBeDown(
+                                    be.getId(), be.getHost(), 100);
                         }
                     }
                     return isChanged;
@@ -246,6 +255,14 @@ public class HeartbeatMgr extends MasterDaemon {
                     result.setBackendInfo(backendInfo);
                 }
 
+                String debugDeadBeIds = DebugPointUtil.getDebugParamOrDefault(
+                        "HeartbeatMgr.BackendHeartbeatHandler", "deadBeIds", "");
+                if (!Strings.isNullOrEmpty(debugDeadBeIds)
+                        && Arrays.stream(debugDeadBeIds.split(",")).anyMatch(id -> Long.parseLong(id) == backendId)) {
+                    result.getStatus().setStatusCode(TStatusCode.INTERNAL_ERROR);
+                    result.getStatus().addToErrorMsgs("debug point HeartbeatMgr.deadBeIds set dead be");
+                }
+
                 ok = true;
                 if (result.getStatus().getStatusCode() == TStatusCode.OK) {
                     TBackendInfo tBackendInfo = result.getBackendInfo();
@@ -268,12 +285,18 @@ public class HeartbeatMgr extends MasterDaemon {
                     if (tBackendInfo.isSetBeNodeRole()) {
                         nodeRole = tBackendInfo.getBeNodeRole();
                     }
+
+                    long fragmentNum = tBackendInfo.getFragmentExecutingCount();
+                    long lastFragmentUpdateTime = tBackendInfo.getFragmentLastActiveTime();
+
                     boolean isShutDown = false;
                     if (tBackendInfo.isSetIsShutdown()) {
                         isShutDown = tBackendInfo.isIsShutdown();
                     }
+                    long beMemory = tBackendInfo.isSetBeMem() ? tBackendInfo.getBeMem() : 0;
                     return new BackendHbResponse(backendId, bePort, httpPort, brpcPort,
-                            System.currentTimeMillis(), beStartTime, version, nodeRole, isShutDown, arrowFlightSqlPort);
+                            System.currentTimeMillis(), beStartTime, version, nodeRole,
+                            fragmentNum, lastFragmentUpdateTime, isShutDown, arrowFlightSqlPort, beMemory);
                 } else {
                     return new BackendHbResponse(backendId, backend.getHost(),
                             result.getStatus().getErrorMsgs().isEmpty()

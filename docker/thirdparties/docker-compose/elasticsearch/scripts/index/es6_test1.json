@@ -46,7 +46,7 @@
           "type": "long"
         },
         "c_unsigned_long": {
-          "type": "unsigned_long"
+          "type": "long"
         },
         "c_float": {
           "type": "float"
@@ -96,6 +96,9 @@
               "ignore_above": 256
             }
           }
+        },
+        "c_user": {
+          "type": "nested"
         }
       }
     }

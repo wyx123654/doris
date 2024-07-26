@@ -21,6 +21,7 @@ import org.apache.doris.catalog.CatalogTestUtil;
 import org.apache.doris.catalog.DiskInfo;
 import org.apache.doris.catalog.DiskInfo.DiskState;
 import org.apache.doris.common.ClientPool;
+import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.proto.Data;
 import org.apache.doris.proto.InternalService;
 import org.apache.doris.proto.PBackendServiceGrpc;
@@ -37,6 +38,8 @@ import org.apache.doris.thrift.TBackendInfo;
 import org.apache.doris.thrift.TCancelPlanFragmentParams;
 import org.apache.doris.thrift.TCancelPlanFragmentResult;
 import org.apache.doris.thrift.TCheckStorageFormatResult;
+import org.apache.doris.thrift.TCheckWarmUpCacheAsyncRequest;
+import org.apache.doris.thrift.TCheckWarmUpCacheAsyncResponse;
 import org.apache.doris.thrift.TCloneReq;
 import org.apache.doris.thrift.TDiskTrashInfo;
 import org.apache.doris.thrift.TDropTabletReq;
@@ -46,6 +49,12 @@ import org.apache.doris.thrift.TExportState;
 import org.apache.doris.thrift.TExportStatusResult;
 import org.apache.doris.thrift.TExportTaskRequest;
 import org.apache.doris.thrift.TFinishTaskRequest;
+import org.apache.doris.thrift.TGetBeResourceRequest;
+import org.apache.doris.thrift.TGetBeResourceResult;
+import org.apache.doris.thrift.TGetRealtimeExecStatusRequest;
+import org.apache.doris.thrift.TGetRealtimeExecStatusResponse;
+import org.apache.doris.thrift.TGetTopNHotPartitionsRequest;
+import org.apache.doris.thrift.TGetTopNHotPartitionsResponse;
 import org.apache.doris.thrift.THeartbeatResult;
 import org.apache.doris.thrift.TIngestBinlogRequest;
 import org.apache.doris.thrift.TIngestBinlogResult;
@@ -67,12 +76,18 @@ import org.apache.doris.thrift.TStatus;
 import org.apache.doris.thrift.TStatusCode;
 import org.apache.doris.thrift.TStorageMediumMigrateReq;
 import org.apache.doris.thrift.TStreamLoadRecordResult;
+import org.apache.doris.thrift.TSyncLoadForTabletsRequest;
+import org.apache.doris.thrift.TSyncLoadForTabletsResponse;
 import org.apache.doris.thrift.TTabletInfo;
 import org.apache.doris.thrift.TTabletStatResult;
 import org.apache.doris.thrift.TTaskType;
 import org.apache.doris.thrift.TTransmitDataParams;
 import org.apache.doris.thrift.TTransmitDataResult;
 import org.apache.doris.thrift.TUniqueId;
+import org.apache.doris.thrift.TWarmUpCacheAsyncRequest;
+import org.apache.doris.thrift.TWarmUpCacheAsyncResponse;
+import org.apache.doris.thrift.TWarmUpTabletsRequest;
+import org.apache.doris.thrift.TWarmUpTabletsResponse;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -182,8 +197,8 @@ public class MockedBackendFactory {
                             if (address == null) {
                                 System.out.println("fe addr thread race, please check it");
                             }
-                            System.out.println(
-                                    "get agent task request. type: " + request.getTaskType() + ", signature: "
+                            System.out.println(backend.getHost() + ":" + backend.getHeartbeatPort() + " "
+                                    + "get agent task request. type: " + request.getTaskType() + ", signature: "
                                     + request.getSignature() + ", fe addr: " + address);
                             TFinishTaskRequest finishTaskRequest = new TFinishTaskRequest(tBackend,
                                     request.getTaskType(), request.getSignature(), new TStatus(TStatusCode.OK));
@@ -235,6 +250,13 @@ public class MockedBackendFactory {
                 }
 
                 private void handleCloneTablet(TAgentTaskRequest request, TFinishTaskRequest finishTaskRequest) {
+                    while (DebugPointUtil.isEnable("MockedBackendFactory.handleCloneTablet.block")) {
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            // ignore
+                        }
+                    }
                     TCloneReq req = request.getCloneReq();
                     long dataSize = Math.max(1, CatalogTestUtil.getTabletDataSize(req.tablet_id));
                     long pathHash = req.dest_path_hash;
@@ -319,7 +341,8 @@ public class MockedBackendFactory {
         public TAgentResult submitTasks(List<TAgentTaskRequest> tasks) throws TException {
             for (TAgentTaskRequest request : tasks) {
                 taskQueue.add(request);
-                System.out.println("receive agent task request. type: " + request.getTaskType() + ", signature: "
+                System.out.println(backend.getHost() + ":" + backend.getHeartbeatPort() + " "
+                        + "receive agent task request. type: " + request.getTaskType() + ", signature: "
                         + request.getSignature());
             }
             return new TAgentResult(new TStatus(TStatusCode.OK));
@@ -343,6 +366,11 @@ public class MockedBackendFactory {
         @Override
         public TPublishTopicResult publishTopicInfo(TPublishTopicRequest request) throws TException {
             return new TPublishTopicResult(new TStatus(TStatusCode.OK));
+        }
+
+        @Override
+        public TGetBeResourceResult getBeResource(TGetBeResourceRequest request) throws TException {
+            return null;
         }
 
         @Override
@@ -401,13 +429,18 @@ public class MockedBackendFactory {
         }
 
         @Override
-        public void cleanTrash() throws TException {
-            return;
+        public TCheckStorageFormatResult checkStorageFormat() throws TException {
+            return new TCheckStorageFormatResult();
         }
 
         @Override
-        public TCheckStorageFormatResult checkStorageFormat() throws TException {
-            return new TCheckStorageFormatResult();
+        public TWarmUpCacheAsyncResponse warmUpCacheAsync(TWarmUpCacheAsyncRequest request) throws TException {
+            return new TWarmUpCacheAsyncResponse();
+        }
+
+        @Override
+        public TCheckWarmUpCacheAsyncResponse checkWarmUpCacheAsync(TCheckWarmUpCacheAsyncRequest request) throws TException {
+            return new TCheckWarmUpCacheAsyncResponse();
         }
 
         @Override
@@ -416,7 +449,28 @@ public class MockedBackendFactory {
         }
 
         @Override
+        public TSyncLoadForTabletsResponse syncLoadForTablets(TSyncLoadForTabletsRequest request) throws TException {
+            return new TSyncLoadForTabletsResponse();
+        }
+
+        @Override
+        public TGetTopNHotPartitionsResponse getTopNHotPartitions(TGetTopNHotPartitionsRequest request) throws TException {
+            return new TGetTopNHotPartitionsResponse();
+        }
+
+        @Override
+        public TWarmUpTabletsResponse warmUpTablets(TWarmUpTabletsRequest request) throws TException {
+            return new TWarmUpTabletsResponse();
+        }
+
+        @Override
         public TQueryIngestBinlogResult queryIngestBinlog(TQueryIngestBinlogRequest queryIngestBinlogRequest)
+                throws TException {
+            return null;
+        }
+
+        @Override
+        public TGetRealtimeExecStatusResponse getRealtimeExecStatus(TGetRealtimeExecStatusRequest request)
                 throws TException {
             return null;
         }

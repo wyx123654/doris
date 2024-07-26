@@ -31,6 +31,7 @@
 #include "vec/columns/column_object.h"
 #include "vec/columns/subcolumn_tree.h"
 #include "vec/common/assert_cast.h"
+#include "vec/data_types/data_type.h"
 #include "vec/data_types/data_type_object.h"
 #include "vec/data_types/data_type_string.h"
 #include "vec/json/path_in_data.h"
@@ -63,12 +64,11 @@ using SubcolumnColumnReaders = vectorized::SubcolumnsTree<SubcolumnReader>;
 // Reader for hierarchical data for variant, merge with root(sparse encoded columns)
 class HierarchicalDataReader : public ColumnIterator {
 public:
-    HierarchicalDataReader(const vectorized::PathInData& path, bool output_as_raw_json = false)
-            : _path(path), _output_as_raw_json(output_as_raw_json) {}
+    HierarchicalDataReader(const vectorized::PathInData& path) : _path(path) {}
 
     static Status create(std::unique_ptr<ColumnIterator>* reader, vectorized::PathInData path,
                          const SubcolumnColumnReaders::Node* target_node,
-                         const SubcolumnColumnReaders::Node* root, bool output_as_raw_json = false);
+                         const SubcolumnColumnReaders::Node* root);
 
     Status init(const ColumnIteratorOptions& opts) override;
 
@@ -92,7 +92,6 @@ private:
     std::unique_ptr<StreamReader> _root_reader;
     size_t _rows_read = 0;
     vectorized::PathInData _path;
-    bool _output_as_raw_json = false;
 
     template <typename NodeFunction>
     Status tranverse(NodeFunction&& node_func) {
@@ -153,22 +152,9 @@ private:
             return Status::OK();
         }));
 
-        if (_output_as_raw_json) {
-            auto col_to = vectorized::ColumnString::create();
-            col_to->reserve(nrows * 2);
-            vectorized::VectorBufferWriter write_buffer(*col_to.get());
-            auto type = std::make_shared<vectorized::DataTypeObject>();
-            for (size_t i = 0; i < nrows; ++i) {
-                type->to_string(container_variant, i, write_buffer);
-                write_buffer.commit();
-            }
-            CHECK(variant.empty());
-            variant.create_root(std::make_shared<vectorized::DataTypeString>(), std::move(col_to));
-        } else {
-            // TODO select v:b -> v.b / v.b.c but v.d maybe in v
-            // copy container variant to dst variant, todo avoid copy
-            variant.insert_range_from(container_variant, 0, nrows);
-        }
+        // TODO select v:b -> v.b / v.b.c but v.d maybe in v
+        // copy container variant to dst variant, todo avoid copy
+        variant.insert_range_from(container_variant, 0, nrows);
 
         // variant.set_num_rows(nrows);
         _rows_read += nrows;
@@ -210,8 +196,11 @@ private:
 // encodes sparse columns that are not materialized
 class ExtractReader : public ColumnIterator {
 public:
-    ExtractReader(const TabletColumn& col, std::unique_ptr<StreamReader>&& root_reader)
-            : _col(col), _root_reader(std::move(root_reader)) {}
+    ExtractReader(const TabletColumn& col, std::unique_ptr<StreamReader>&& root_reader,
+                  vectorized::DataTypePtr target_type_hint)
+            : _col(col),
+              _root_reader(std::move(root_reader)),
+              _target_type_hint(target_type_hint) {}
 
     Status init(const ColumnIteratorOptions& opts) override;
 
@@ -232,6 +221,7 @@ private:
     TabletColumn _col;
     // may shared among different column iterators
     std::unique_ptr<StreamReader> _root_reader;
+    vectorized::DataTypePtr _target_type_hint;
 };
 
 } // namespace segment_v2

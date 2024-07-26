@@ -20,7 +20,10 @@
 // IWYU pragma: no_include <bthread/errno.h>
 #include <errno.h> // IWYU pragma: keep
 #include <gflags/gflags.h>
+#if !defined(__SANITIZE_ADDRESS__) && !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && \
+        !defined(THREAD_SANITIZER) && !defined(USE_JEMALLOC)
 #include <gperftools/malloc_extension.h> // IWYU pragma: keep
+#endif
 // IWYU pragma: no_include <bits/std_abs.h>
 #include <butil/iobuf.h>
 #include <math.h>
@@ -37,6 +40,7 @@
 #include <set>
 #include <string>
 
+#include "cloud/config.h"
 #include "common/config.h"
 #include "common/logging.h"
 #include "common/status.h"
@@ -44,14 +48,16 @@
 #include "olap/options.h"
 #include "olap/storage_engine.h"
 #include "olap/tablet_manager.h"
-#include "runtime/block_spill_manager.h"
+#include "runtime/be_proc_monitor.h"
 #include "runtime/client_cache.h"
 #include "runtime/exec_env.h"
 #include "runtime/fragment_mgr.h"
+#include "runtime/memory/global_memory_arbitrator.h"
 #include "runtime/memory/mem_tracker.h"
 #include "runtime/memory/mem_tracker_limiter.h"
+#include "runtime/memory/memory_reclamation.h"
 #include "runtime/runtime_query_statistics_mgr.h"
-#include "runtime/task_group/task_group_manager.h"
+#include "runtime/workload_group/workload_group_manager.h"
 #include "util/cpu_info.h"
 #include "util/debug_util.h"
 #include "util/disk_info.h"
@@ -65,6 +71,20 @@
 #include "util/time.h"
 
 namespace doris {
+namespace {
+
+void update_rowsets_and_segments_num_metrics() {
+    if (config::is_cloud_mode()) {
+        // TODO(plat1ko): CloudStorageEngine
+    } else {
+        StorageEngine& engine = ExecEnv::GetInstance()->storage_engine().to_local();
+        auto* metrics = DorisMetrics::instance();
+        metrics->all_rowsets_num->set_value(engine.tablet_manager()->get_rowset_nums());
+        metrics->all_segments_num->set_value(engine.tablet_manager()->get_segment_nums());
+    }
+}
+
+} // namespace
 
 void Daemon::tcmalloc_gc_thread() {
     // TODO All cache GC wish to be supported
@@ -192,27 +212,31 @@ void Daemon::memory_maintenance_thread() {
         // Refresh process memory metrics.
         doris::PerfCounters::refresh_proc_status();
         doris::MemInfo::refresh_proc_meminfo();
-        doris::MemInfo::refresh_proc_mem_no_allocator_cache();
+        doris::GlobalMemoryArbitrator::reset_refresh_interval_memory_growth();
+        ExecEnv::GetInstance()->brpc_iobuf_block_memory_tracker()->set_consumption(
+                butil::IOBuf::block_memory());
+        // Refresh allocator memory metrics.
+#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
+        doris::MemInfo::refresh_allocator_mem();
+#ifdef USE_JEMALLOC
+        if (doris::MemInfo::je_dirty_pages_mem() > doris::MemInfo::je_dirty_pages_mem_limit() &&
+            GlobalMemoryArbitrator::is_exceed_soft_mem_limit()) {
+            doris::MemInfo::notify_je_purge_dirty_pages();
+        }
+#endif
+        if (config::enable_system_metrics) {
+            DorisMetrics::instance()->system_metrics()->update_allocator_metrics();
+        }
+#endif
 
         // Update and print memory stat when the memory changes by 256M.
         if (abs(last_print_proc_mem - PerfCounters::get_vm_rss()) > 268435456) {
             last_print_proc_mem = PerfCounters::get_vm_rss();
+            doris::MemTrackerLimiter::clean_tracker_limiter_group();
             doris::MemTrackerLimiter::enable_print_log_process_usage();
-
             // Refresh mem tracker each type counter.
             doris::MemTrackerLimiter::refresh_global_counter();
-
-            // Refresh allocator memory metrics.
-#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
-            doris::MemInfo::refresh_allocator_mem();
-            if (config::enable_system_metrics) {
-                DorisMetrics::instance()->system_metrics()->update_allocator_metrics();
-            }
-#endif
-
-            ExecEnv::GetInstance()->brpc_iobuf_block_memory_tracker()->set_consumption(
-                    butil::IOBuf::block_memory());
-            LOG(INFO) << MemTrackerLimiter::
+            LOG(INFO) << doris::GlobalMemoryArbitrator::
                             process_mem_log_str(); // print mem log when memory state by 256M
         }
     }
@@ -228,36 +252,38 @@ void Daemon::memory_gc_thread() {
         if (config::disable_memory_gc) {
             continue;
         }
-        auto sys_mem_available = doris::MemInfo::sys_mem_available();
-        auto proc_mem_no_allocator_cache = doris::MemInfo::proc_mem_no_allocator_cache();
+        auto sys_mem_available = doris::GlobalMemoryArbitrator::sys_mem_available();
+        auto process_memory_usage = doris::GlobalMemoryArbitrator::process_memory_usage();
 
         // GC excess memory for resource groups that not enable overcommit
-        auto tg_free_mem = doris::MemInfo::tg_not_enable_overcommit_group_gc();
+        auto tg_free_mem = doris::MemoryReclamation::tg_disable_overcommit_group_gc();
         sys_mem_available += tg_free_mem;
-        proc_mem_no_allocator_cache -= tg_free_mem;
+        process_memory_usage -= tg_free_mem;
 
         if (memory_full_gc_sleep_time_ms <= 0 &&
             (sys_mem_available < doris::MemInfo::sys_mem_available_low_water_mark() ||
-             proc_mem_no_allocator_cache >= doris::MemInfo::mem_limit())) {
+             process_memory_usage >= doris::MemInfo::mem_limit())) {
             // No longer full gc and minor gc during sleep.
+            std::string mem_info =
+                    doris::GlobalMemoryArbitrator::process_limit_exceeded_errmsg_str();
             memory_full_gc_sleep_time_ms = memory_gc_sleep_time_ms;
             memory_minor_gc_sleep_time_ms = memory_gc_sleep_time_ms;
-            LOG(INFO) << fmt::format("[MemoryGC] start full GC, {}.",
-                                     MemTrackerLimiter::process_limit_exceeded_errmsg_str());
+            LOG(INFO) << fmt::format("[MemoryGC] start full GC, {}.", mem_info);
             doris::MemTrackerLimiter::print_log_process_usage();
-            if (doris::MemInfo::process_full_gc()) {
+            if (doris::MemoryReclamation::process_full_gc(std::move(mem_info))) {
                 // If there is not enough memory to be gc, the process memory usage will not be printed in the next continuous gc.
                 doris::MemTrackerLimiter::enable_print_log_process_usage();
             }
         } else if (memory_minor_gc_sleep_time_ms <= 0 &&
                    (sys_mem_available < doris::MemInfo::sys_mem_available_warning_water_mark() ||
-                    proc_mem_no_allocator_cache >= doris::MemInfo::soft_mem_limit())) {
+                    process_memory_usage >= doris::MemInfo::soft_mem_limit())) {
             // No minor gc during sleep, but full gc is possible.
+            std::string mem_info =
+                    doris::GlobalMemoryArbitrator::process_soft_limit_exceeded_errmsg_str();
             memory_minor_gc_sleep_time_ms = memory_gc_sleep_time_ms;
-            LOG(INFO) << fmt::format("[MemoryGC] start minor GC, {}.",
-                                     MemTrackerLimiter::process_soft_limit_exceeded_errmsg_str());
+            LOG(INFO) << fmt::format("[MemoryGC] start minor GC, {}.", mem_info);
             doris::MemTrackerLimiter::print_log_process_usage();
-            if (doris::MemInfo::process_minor_gc()) {
+            if (doris::MemoryReclamation::process_minor_gc(std::move(mem_info))) {
                 doris::MemTrackerLimiter::enable_print_log_process_usage();
             }
         } else {
@@ -271,7 +297,7 @@ void Daemon::memory_gc_thread() {
     }
 }
 
-void Daemon::memtable_memory_limiter_tracker_refresh_thread() {
+void Daemon::memtable_memory_refresh_thread() {
     // Refresh the memory statistics of the load channel tracker more frequently,
     // which helps to accurately control the memory of LoadChannelMgr.
     while (!_stop_background_threads_latch.wait_for(
@@ -339,20 +365,9 @@ void Daemon::calculate_metrics_thread() {
                 DorisMetrics::instance()->system_metrics()->get_network_traffic(
                         &lst_net_send_bytes, &lst_net_receive_bytes);
             }
-
-            DorisMetrics::instance()->all_rowsets_num->set_value(
-                    StorageEngine::instance()->tablet_manager()->get_rowset_nums());
-            DorisMetrics::instance()->all_segments_num->set_value(
-                    StorageEngine::instance()->tablet_manager()->get_segment_nums());
+            update_rowsets_and_segments_num_metrics();
         }
     } while (!_stop_background_threads_latch.wait_for(std::chrono::seconds(15)));
-}
-
-// clean up stale spilled files
-void Daemon::block_spill_gc_thread() {
-    while (!_stop_background_threads_latch.wait_for(std::chrono::seconds(60))) {
-        ExecEnv::GetInstance()->block_spill_mgr()->gc(200);
-    }
 }
 
 void Daemon::report_runtime_query_statistics_thread() {
@@ -377,6 +392,21 @@ void Daemon::je_purge_dirty_pages_thread() const {
     } while (true);
 }
 
+void Daemon::wg_weighted_memory_ratio_refresh_thread() {
+    // Refresh weighted memory ratio of workload groups
+    while (!_stop_background_threads_latch.wait_for(
+            std::chrono::milliseconds(config::wg_weighted_memory_ratio_refresh_interval_ms))) {
+        doris::ExecEnv::GetInstance()->workload_group_mgr()->refresh_wg_weighted_memory_ratio();
+    }
+}
+
+void Daemon::be_proc_monitor_thread() {
+    while (!_stop_background_threads_latch.wait_for(
+            std::chrono::milliseconds(config::be_proc_monitor_interval_ms))) {
+        LOG(INFO) << "log be thread num, " << BeProcMonitor::get_be_thread_info();
+    }
+}
+
 void Daemon::start() {
     Status st;
     st = Thread::create(
@@ -392,9 +422,8 @@ void Daemon::start() {
             &_threads.emplace_back());
     CHECK(st.ok()) << st;
     st = Thread::create(
-            "Daemon", "memtable_memory_limiter_tracker_refresh_thread",
-            [this]() { this->memtable_memory_limiter_tracker_refresh_thread(); },
-            &_threads.emplace_back());
+            "Daemon", "memtable_memory_refresh_thread",
+            [this]() { this->memtable_memory_refresh_thread(); }, &_threads.emplace_back());
     CHECK(st.ok()) << st;
 
     if (config::enable_metric_calculator) {
@@ -404,14 +433,23 @@ void Daemon::start() {
         CHECK(st.ok()) << st;
     }
     st = Thread::create(
-            "Daemon", "block_spill_gc_thread", [this]() { this->block_spill_gc_thread(); },
-            &_threads.emplace_back());
-    st = Thread::create(
             "Daemon", "je_purge_dirty_pages_thread",
             [this]() { this->je_purge_dirty_pages_thread(); }, &_threads.emplace_back());
     st = Thread::create(
             "Daemon", "query_runtime_statistics_thread",
             [this]() { this->report_runtime_query_statistics_thread(); }, &_threads.emplace_back());
+    CHECK(st.ok()) << st;
+
+    st = Thread::create(
+            "Daemon", "wg_weighted_memory_ratio_refresh_thread",
+            [this]() { this->wg_weighted_memory_ratio_refresh_thread(); },
+            &_threads.emplace_back());
+
+    if (config::enable_be_proc_monitor) {
+        st = Thread::create(
+                "Daemon", "be_proc_monitor_thread", [this]() { this->be_proc_monitor_thread(); },
+                &_threads.emplace_back());
+    }
     CHECK(st.ok()) << st;
 }
 

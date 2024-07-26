@@ -39,6 +39,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cloud/cloud_storage_engine.h"
+#include "cloud/config.h"
 #include "common/config.h"
 #include "common/consts.h"
 #include "common/logging.h"
@@ -76,6 +78,8 @@ using namespace ErrorCode;
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(streaming_load_requests_total, MetricUnit::REQUESTS);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(streaming_load_duration_ms, MetricUnit::MILLISECONDS);
 DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(streaming_load_current_processing, MetricUnit::REQUESTS);
+
+bvar::LatencyRecorder g_stream_load_receive_data_latency_ms("stream_load_receive_data_latency_ms");
 
 static constexpr size_t MIN_CHUNK_SIZE = 64 * 1024;
 static const string CHUNK = "chunked";
@@ -136,14 +140,13 @@ void StreamLoadAction::handle(HttpRequest* req) {
     // update statistics
     streaming_load_requests_total->increment(1);
     streaming_load_duration_ms->increment(ctx->load_cost_millis);
-    streaming_load_current_processing->increment(-1);
 }
 
 Status StreamLoadAction::_handle(std::shared_ptr<StreamLoadContext> ctx) {
     if (ctx->body_bytes > 0 && ctx->receive_bytes != ctx->body_bytes) {
         LOG(WARNING) << "recevie body don't equal with body bytes, body_bytes=" << ctx->body_bytes
                      << ", receive_bytes=" << ctx->receive_bytes << ", id=" << ctx->id;
-        return Status::InternalError("receive body don't equal with body bytes");
+        return Status::InternalError<false>("receive body don't equal with body bytes");
     }
 
     // if we use non-streaming, MessageBodyFileSink.finish will close the file
@@ -195,9 +198,11 @@ int StreamLoadAction::on_header(HttpRequest* req) {
 
     LOG(INFO) << "new income streaming load request." << ctx->brief() << ", db=" << ctx->db
               << ", tbl=" << ctx->table << ", group_commit=" << ctx->group_commit;
+    ctx->begin_receive_and_read_data_cost_nanos = MonotonicNanos();
 
     if (st.ok()) {
         st = _on_header(req, ctx);
+        LOG(INFO) << "finished to handle HTTP header, " << ctx->brief();
     }
     if (!st.ok()) {
         ctx->status = std::move(st);
@@ -212,7 +217,6 @@ int StreamLoadAction::on_header(HttpRequest* req) {
         // add new line at end
         str = str + '\n';
         HttpChannel::send_reply(req, str);
-        streaming_load_current_processing->increment(-1);
 #ifndef BE_TEST
         if (config::enable_stream_load_record) {
             str = ctx->prepare_stream_load_record(str);
@@ -228,13 +232,13 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, std::shared_ptr<Strea
     // auth information
     if (!parse_basic_auth(*http_req, &ctx->auth)) {
         LOG(WARNING) << "parse basic authorization failed." << ctx->brief();
-        return Status::InternalError("no valid Basic authorization");
+        return Status::InternalError<false>("no valid Basic authorization");
     }
 
     // get format of this put
     if (!http_req->header(HTTP_COMPRESS_TYPE).empty() &&
         iequal(http_req->header(HTTP_FORMAT_KEY), "JSON")) {
-        return Status::InternalError("compress data of JSON format is not supported.");
+        return Status::InternalError<false>("compress data of JSON format is not supported.");
     }
     std::string format_str = http_req->header(HTTP_FORMAT_KEY);
     if (iequal(format_str, BeConsts::CSV_WITH_NAMES) ||
@@ -250,8 +254,8 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, std::shared_ptr<Strea
     LoadUtil::parse_format(format_str, http_req->header(HTTP_COMPRESS_TYPE), &ctx->format,
                            &ctx->compress_type);
     if (ctx->format == TFileFormatType::FORMAT_UNKNOWN) {
-        return Status::InternalError("unknown data format, format={}",
-                                     http_req->header(HTTP_FORMAT_KEY));
+        return Status::InternalError<false>("unknown data format, format={}",
+                                            http_req->header(HTTP_FORMAT_KEY));
     }
 
     // check content length
@@ -269,7 +273,7 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, std::shared_ptr<Strea
         // json max body size
         if ((ctx->format == TFileFormatType::FORMAT_JSON) &&
             (ctx->body_bytes > json_max_body_bytes) && !read_json_by_line) {
-            return Status::InternalError(
+            return Status::InternalError<false>(
                     "The size of this batch exceed the max size [{}]  of json type data "
                     " data [ {} ]. Split the file, or use 'read_json_by_line'",
                     json_max_body_bytes, ctx->body_bytes);
@@ -277,8 +281,8 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, std::shared_ptr<Strea
         // csv max body size
         else if (ctx->body_bytes > csv_max_body_bytes) {
             LOG(WARNING) << "body exceed max size." << ctx->brief();
-            return Status::InternalError("body exceed max size: {}, data: {}", csv_max_body_bytes,
-                                         ctx->body_bytes);
+            return Status::InternalError<false>("body exceed max size: {}, data: {}",
+                                                csv_max_body_bytes, ctx->body_bytes);
         }
     } else {
 #ifndef BE_TEST
@@ -296,13 +300,14 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, std::shared_ptr<Strea
                   !ctx->is_chunked_transfer))) {
         LOG(WARNING) << "content_length is empty and transfer-encoding!=chunked, please set "
                         "content_length or transfer-encoding=chunked";
-        return Status::InternalError(
+        return Status::InternalError<false>(
                 "content_length is empty and transfer-encoding!=chunked, please set content_length "
                 "or transfer-encoding=chunked");
     } else if (UNLIKELY(!http_req->header(HttpHeaders::CONTENT_LENGTH).empty() &&
                         ctx->is_chunked_transfer)) {
         LOG(WARNING) << "please do not set both content_length and transfer-encoding";
-        return Status::InternalError("please do not set both content_length and transfer-encoding");
+        return Status::InternalError<false>(
+                "please do not set both content_length and transfer-encoding");
     }
 
     if (!http_req->header(HTTP_TIMEOUT).empty()) {
@@ -350,7 +355,15 @@ void StreamLoadAction::on_chunk_data(HttpRequest* req) {
         }
         ctx->receive_bytes += remove_bytes;
     }
-    ctx->read_data_cost_nanos += (MonotonicNanos() - start_read_data_time);
+    int64_t read_data_time = MonotonicNanos() - start_read_data_time;
+    int64_t last_receive_and_read_data_cost_nanos = ctx->receive_and_read_data_cost_nanos;
+    ctx->read_data_cost_nanos += read_data_time;
+    ctx->receive_and_read_data_cost_nanos =
+            MonotonicNanos() - ctx->begin_receive_and_read_data_cost_nanos;
+    g_stream_load_receive_data_latency_ms
+            << (ctx->receive_and_read_data_cost_nanos - last_receive_and_read_data_cost_nanos -
+                read_data_time) /
+                       1000000;
 }
 
 void StreamLoadAction::free_handler_ctx(std::shared_ptr<void> param) {
@@ -364,6 +377,7 @@ void StreamLoadAction::free_handler_ctx(std::shared_ptr<void> param) {
     }
     // remove stream load context from stream load manager and the resource will be released
     ctx->exec_env()->new_load_stream_mgr()->remove(ctx->id);
+    streaming_load_current_processing->increment(-1);
 }
 
 Status StreamLoadAction::_process_put(HttpRequest* http_req,
@@ -462,8 +476,11 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
             return Status::InvalidArgument("Invalid strict mode format. Must be bool type");
         }
     }
+    // timezone first. if not, try time_zone
     if (!http_req->header(HTTP_TIMEZONE).empty()) {
         request.__set_timezone(http_req->header(HTTP_TIMEZONE));
+    } else if (!http_req->header(HTTP_TIME_ZONE).empty()) {
+        request.__set_timezone(http_req->header(HTTP_TIME_ZONE));
     }
     if (!http_req->header(HTTP_EXEC_MEM_LIMIT).empty()) {
         try {
@@ -551,8 +568,9 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
                                                       {"MERGE", TMergeType::MERGE}};
     if (!http_req->header(HTTP_MERGE_TYPE).empty()) {
         std::string merge_type_str = http_req->header(HTTP_MERGE_TYPE);
-        if (merge_type_map.find(merge_type_str) != merge_type_map.end()) {
-            merge_type = merge_type_map.find(merge_type_str)->second;
+        auto iter = merge_type_map.find(merge_type_str);
+        if (iter != merge_type_map.end()) {
+            merge_type = iter->second;
         } else {
             return Status::InvalidArgument("Invalid merge type {}", merge_type_str);
         }
@@ -605,6 +623,10 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
         bool value = iequal(http_req->header(HTTP_MEMTABLE_ON_SINKNODE), "true");
         request.__set_memtable_on_sink_node(value);
     }
+    if (!http_req->header(HTTP_LOAD_STREAM_PER_NODE).empty()) {
+        int value = std::stoi(http_req->header(HTTP_LOAD_STREAM_PER_NODE));
+        request.__set_stream_per_node(value);
+    }
     if (ctx->group_commit) {
         if (!http_req->header(HTTP_GROUP_COMMIT).empty()) {
             request.__set_group_commit_mode(http_req->header(HTTP_GROUP_COMMIT));
@@ -612,6 +634,10 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
             // used for wait_internal_group_commit_finish
             request.__set_group_commit_mode("sync_mode");
         }
+    }
+
+    if (!http_req->header(HTTP_CLOUD_CLUSTER).empty()) {
+        request.__set_cloud_cluster(http_req->header(HTTP_CLOUD_CLUSTER));
     }
 
 #ifndef BE_TEST
@@ -632,16 +658,23 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
         LOG(WARNING) << "plan streaming load failed. errmsg=" << plan_status << ctx->brief();
         return plan_status;
     }
+    if (config::is_cloud_mode() && ctx->two_phase_commit && ctx->is_mow_table()) {
+        return Status::NotSupported("stream load 2pc is unsupported for mow table");
+    }
     if (http_req->header(HTTP_GROUP_COMMIT) == "async_mode") {
-        size_t content_length = std::stol(http_req->header(HttpHeaders::CONTENT_LENGTH));
-        if (ctx->format == TFileFormatType::FORMAT_CSV_GZ ||
-            ctx->format == TFileFormatType::FORMAT_CSV_LZO ||
-            ctx->format == TFileFormatType::FORMAT_CSV_BZ2 ||
-            ctx->format == TFileFormatType::FORMAT_CSV_LZ4FRAME ||
-            ctx->format == TFileFormatType::FORMAT_CSV_LZOP ||
-            ctx->format == TFileFormatType::FORMAT_CSV_LZ4BLOCK ||
-            ctx->format == TFileFormatType::FORMAT_CSV_SNAPPYBLOCK) {
-            content_length *= 3;
+        // FIXME find a way to avoid chunked stream load write large WALs
+        size_t content_length = 0;
+        if (!http_req->header(HttpHeaders::CONTENT_LENGTH).empty()) {
+            content_length = std::stol(http_req->header(HttpHeaders::CONTENT_LENGTH));
+            if (ctx->format == TFileFormatType::FORMAT_CSV_GZ ||
+                ctx->format == TFileFormatType::FORMAT_CSV_LZO ||
+                ctx->format == TFileFormatType::FORMAT_CSV_BZ2 ||
+                ctx->format == TFileFormatType::FORMAT_CSV_LZ4FRAME ||
+                ctx->format == TFileFormatType::FORMAT_CSV_LZOP ||
+                ctx->format == TFileFormatType::FORMAT_CSV_LZ4BLOCK ||
+                ctx->format == TFileFormatType::FORMAT_CSV_SNAPPYBLOCK) {
+                content_length *= 3;
+            }
         }
         ctx->put_result.params.__set_content_length(content_length);
     }
@@ -674,7 +707,9 @@ Status StreamLoadAction::_data_saved_path(HttpRequest* req, std::string* file_pa
 
 void StreamLoadAction::_save_stream_load_record(std::shared_ptr<StreamLoadContext> ctx,
                                                 const std::string& str) {
-    auto stream_load_recorder = StorageEngine::instance()->get_stream_load_recorder();
+    std::shared_ptr<StreamLoadRecorder> stream_load_recorder =
+            ExecEnv::GetInstance()->storage_engine().get_stream_load_recorder();
+
     if (stream_load_recorder != nullptr) {
         std::string key =
                 std::to_string(ctx->start_millis + ctx->load_cost_millis) + "_" + ctx->label;
@@ -693,15 +728,33 @@ Status StreamLoadAction::_handle_group_commit(HttpRequest* req,
     std::string group_commit_mode = req->header(HTTP_GROUP_COMMIT);
     if (!group_commit_mode.empty() && !iequal(group_commit_mode, "sync_mode") &&
         !iequal(group_commit_mode, "async_mode") && !iequal(group_commit_mode, "off_mode")) {
-        return Status::InternalError("group_commit can only be [async_mode, sync_mode, off_mode]");
+        return Status::InternalError<false>(
+                "group_commit can only be [async_mode, sync_mode, off_mode]");
     }
     if (config::wait_internal_group_commit_finish) {
         group_commit_mode = "sync_mode";
     }
-    if (group_commit_mode.empty() || iequal(group_commit_mode, "off_mode")) {
+    int64_t content_length = req->header(HttpHeaders::CONTENT_LENGTH).empty()
+                                     ? 0
+                                     : std::stoll(req->header(HttpHeaders::CONTENT_LENGTH));
+    if (content_length < 0) {
+        std::stringstream ss;
+        ss << "This stream load content length <0 (" << content_length
+           << "), please check your content length.";
+        LOG(WARNING) << ss.str();
+        return Status::InternalError<false>(ss.str());
+    }
+    // allow chunked stream load in flink
+    auto is_chunk = !req->header(HttpHeaders::TRANSFER_ENCODING).empty() &&
+                    req->header(HttpHeaders::TRANSFER_ENCODING).find(CHUNK) != std::string::npos;
+    if (group_commit_mode.empty() || iequal(group_commit_mode, "off_mode") ||
+        (content_length == 0 && !is_chunk)) {
         // off_mode and empty
         ctx->group_commit = false;
         return Status::OK();
+    }
+    if (is_chunk) {
+        ctx->label = "";
     }
 
     auto partial_columns = !req->header(HTTP_PARTIAL_COLUMNS).empty() &&
@@ -710,24 +763,19 @@ Status StreamLoadAction::_handle_group_commit(HttpRequest* req,
     auto partitions = !req->header(HTTP_PARTITIONS).empty();
     if (!partial_columns && !partitions && !temp_partitions && !ctx->two_phase_commit) {
         if (!config::wait_internal_group_commit_finish && !ctx->label.empty()) {
-            return Status::InternalError("label and group_commit can't be set at the same time");
+            return Status::InternalError<false>(
+                    "label and group_commit can't be set at the same time");
         }
         ctx->group_commit = true;
         if (iequal(group_commit_mode, "async_mode")) {
-            group_commit_mode = load_size_smaller_than_wal_limit(req) ? "async_mode" : "sync_mode";
-            if (iequal(group_commit_mode, "sync_mode")) {
-                size_t max_available_size =
-                        ExecEnv::GetInstance()->wal_mgr()->get_max_available_size();
-                LOG(INFO) << "When enable group commit, the data size can't be too large or "
-                             "unknown. The data size for this stream load("
-                          << (req->header(HttpHeaders::CONTENT_LENGTH).empty()
-                                      ? 0
-                                      : req->header(HttpHeaders::CONTENT_LENGTH))
-                          << " Bytes) exceeds the WAL (Write-Ahead Log) limit ("
-                          << max_available_size
-                          << " Bytes). So we set this load to \"group commit\"=sync_mode\" "
-                             "automatically.";
-                return Status::Error<EXCEEDED_LIMIT>("Stream load size too large.");
+            if (!load_size_smaller_than_wal_limit(content_length)) {
+                std::stringstream ss;
+                ss << "There is no space for group commit stream load async WAL. This stream load "
+                      "size is "
+                   << content_length << ". WAL dir info: "
+                   << ExecEnv::GetInstance()->wal_mgr()->get_wal_dirs_info_string();
+                LOG(WARNING) << ss.str();
+                return Status::Error<EXCEEDED_LIMIT>(ss.str());
             }
         }
     }

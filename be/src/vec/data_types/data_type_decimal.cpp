@@ -23,10 +23,11 @@
 #include <fmt/format.h>
 #include <gen_cpp/data.pb.h>
 #include <streamvbyte.h>
-#include <string.h>
+#include <sys/types.h>
 
-#include <utility>
+#include <cstring>
 
+#include "agent/be_exec_version_manager.h"
 #include "runtime/decimalv2_value.h"
 #include "util/string_parser.hpp"
 #include "vec/columns/column.h"
@@ -63,8 +64,13 @@ std::string DataTypeDecimal<T>::to_string(const IColumn& column, size_t row_num)
     ColumnPtr ptr = result.first;
     row_num = result.second;
 
-    auto value = assert_cast<const ColumnType&>(*ptr).get_element(row_num);
-    return value.to_string(scale);
+    if constexpr (!IsDecimalV2<T>) {
+        auto value = assert_cast<const ColumnType&>(*ptr).get_element(row_num);
+        return value.to_string(scale);
+    } else {
+        auto value = (DecimalV2Value)assert_cast<const ColumnType&>(*ptr).get_element(row_num);
+        return value.to_string(get_format_scale());
+    }
 }
 
 template <typename T>
@@ -79,11 +85,52 @@ void DataTypeDecimal<T>::to_string(const IColumn& column, size_t row_num,
         auto str = value.to_string(scale);
         ostr.write(str.data(), str.size());
     } else {
-        DecimalV2Value value =
-                (DecimalV2Value)assert_cast<const ColumnType&>(*ptr).get_element(row_num);
-        auto str = value.to_string(scale);
+        auto value = (DecimalV2Value)assert_cast<const ColumnType&>(*ptr).get_element(row_num);
+        auto str = value.to_string(get_format_scale());
         ostr.write(str.data(), str.size());
     }
+}
+
+template <typename T>
+void DataTypeDecimal<T>::to_string_batch(const IColumn& column, ColumnString& column_to) const {
+    // column may be column const
+    const auto& col_ptr = column.get_ptr();
+    const auto& [column_ptr, is_const] = unpack_if_const(col_ptr);
+    if (is_const) {
+        to_string_batch_impl<true>(column_ptr, column_to);
+    } else {
+        to_string_batch_impl<false>(column_ptr, column_to);
+    }
+}
+
+template <typename T>
+template <bool is_const>
+void DataTypeDecimal<T>::to_string_batch_impl(const ColumnPtr& column_ptr,
+                                              ColumnString& column_to) const {
+    auto& col_vec = assert_cast<const ColumnType&>(*column_ptr);
+    const auto size = col_vec.size();
+    auto& chars = column_to.get_chars();
+    auto& offsets = column_to.get_offsets();
+    offsets.resize(size);
+    chars.reserve(4 * sizeof(T));
+    for (int row_num = 0; row_num < size; row_num++) {
+        auto num = is_const ? col_vec.get_element(0) : col_vec.get_element(row_num);
+        if constexpr (!IsDecimalV2<T>) {
+            T value = num;
+            auto str = value.to_string(scale);
+            chars.insert(str.begin(), str.end());
+        } else {
+            auto value = (DecimalV2Value)num;
+            auto str = value.to_string(get_format_scale());
+            chars.insert(str.begin(), str.end());
+        }
+        offsets[row_num] = chars.size();
+    }
+}
+
+template <typename T>
+std::string DataTypeDecimal<T>::to_string(const T& value) const {
+    return value.to_string(get_format_scale());
 }
 
 template <typename T>
@@ -106,7 +153,7 @@ Status DataTypeDecimal<T>::from_string(ReadBuffer& rb, IColumn* column) const {
 template <typename T>
 int64_t DataTypeDecimal<T>::get_uncompressed_serialized_bytes(const IColumn& column,
                                                               int be_exec_version) const {
-    if (be_exec_version >= 4) {
+    if (be_exec_version >= USE_NEW_SERDE) {
         auto size = sizeof(T) * column.size();
         if (size <= SERIALIZED_MEM_SIZE_LIMIT) {
             return sizeof(uint32_t) + size;
@@ -121,7 +168,7 @@ int64_t DataTypeDecimal<T>::get_uncompressed_serialized_bytes(const IColumn& col
 
 template <typename T>
 char* DataTypeDecimal<T>::serialize(const IColumn& column, char* buf, int be_exec_version) const {
-    if (be_exec_version >= 4) {
+    if (be_exec_version >= USE_NEW_SERDE) {
         // row num
         const auto mem_size = column.size() * sizeof(T);
         *reinterpret_cast<uint32_t*>(buf) = mem_size;
@@ -158,7 +205,7 @@ char* DataTypeDecimal<T>::serialize(const IColumn& column, char* buf, int be_exe
 template <typename T>
 const char* DataTypeDecimal<T>::deserialize(const char* buf, IColumn* column,
                                             int be_exec_version) const {
-    if (be_exec_version >= 4) {
+    if (be_exec_version >= USE_NEW_SERDE) {
         // row num
         uint32_t mem_size = *reinterpret_cast<const uint32_t*>(buf);
         buf += sizeof(uint32_t);
@@ -214,7 +261,7 @@ bool DataTypeDecimal<T>::parse_from_string(const std::string& str, T* res) const
     StringParser::ParseResult result = StringParser::PARSE_SUCCESS;
     res->value = StringParser::string_to_decimal<DataTypeDecimalSerDe<T>::get_primitive_type()>(
             str.c_str(), str.size(), precision, scale, &result);
-    return result == StringParser::PARSE_SUCCESS;
+    return result == StringParser::PARSE_SUCCESS || result == StringParser::PARSE_UNDERFLOW;
 }
 
 DataTypePtr create_decimal(UInt64 precision_value, UInt64 scale_value, bool use_v2) {

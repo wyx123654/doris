@@ -343,12 +343,14 @@ private:
                 execute_num_right_type<T0, Int32>(block, result, col_left, col_right_untyped) ||
                 execute_num_right_type<T0, Int64>(block, result, col_left, col_right_untyped) ||
                 execute_num_right_type<T0, Int128>(block, result, col_left, col_right_untyped) ||
+                execute_num_right_type<T0, IPv6>(block, result, col_left, col_right_untyped) ||
                 execute_num_right_type<T0, Float32>(block, result, col_left, col_right_untyped) ||
-                execute_num_right_type<T0, Float64>(block, result, col_left, col_right_untyped))
+                execute_num_right_type<T0, Float64>(block, result, col_left, col_right_untyped)) {
                 return true;
-            else {
-                LOG(FATAL) << "Illegal column " << col_right_untyped->get_name()
-                           << " of second argument of function " << get_name();
+            } else {
+                throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
+                                       "Illegal column ({}) of second argument of function {}",
+                                       col_right_untyped->get_name(), get_name());
             }
 
         } else if (auto col_left_const =
@@ -371,14 +373,17 @@ private:
                                                         col_right_untyped) ||
                 execute_num_const_right_type<T0, Int128>(block, result, col_left_const,
                                                          col_right_untyped) ||
+                execute_num_const_right_type<T0, IPv6>(block, result, col_left_const,
+                                                       col_right_untyped) ||
                 execute_num_const_right_type<T0, Float32>(block, result, col_left_const,
                                                           col_right_untyped) ||
                 execute_num_const_right_type<T0, Float64>(block, result, col_left_const,
-                                                          col_right_untyped))
+                                                          col_right_untyped)) {
                 return true;
-            else {
-                LOG(FATAL) << "Illegal column " << col_right_untyped->get_name()
-                           << " of second argument of function " << get_name();
+            } else {
+                throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
+                                       "Illegal column ({}) f second argument of function {}",
+                                       col_right_untyped->get_name(), get_name());
             }
         }
 
@@ -587,6 +592,7 @@ public:
                                                col_right_untyped) ||
                   execute_num_left_type<Int128>(block, result, col_left_untyped,
                                                 col_right_untyped) ||
+                  execute_num_left_type<IPv6>(block, result, col_left_untyped, col_right_untyped) ||
                   execute_num_left_type<Float32>(block, result, col_left_untyped,
                                                  col_right_untyped) ||
                   execute_num_left_type<Float64>(block, result, col_left_untyped,

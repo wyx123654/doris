@@ -47,9 +47,7 @@
 #include "vec/data_types/data_type_decimal.h"
 #include "vec/runtime/vdatetime_value.h"
 
-namespace doris {
-
-namespace vectorized {
+namespace doris::vectorized {
 class VExprContext;
 
 void VLiteral::init(const TExprNode& node) {
@@ -58,8 +56,14 @@ void VLiteral::init(const TExprNode& node) {
     _column_ptr = _data_type->create_column_const(1, field);
 }
 
+Status VLiteral::prepare(RuntimeState* state, const RowDescriptor& desc, VExprContext* context) {
+    RETURN_IF_ERROR_OR_PREPARED(VExpr::prepare(state, desc, context));
+    return Status::OK();
+}
+
 Status VLiteral::execute(VExprContext* context, vectorized::Block* block, int* result_column_id) {
     // Literal expr should return least one row.
+    // sometimes we just use a VLiteral without open or prepare. so can't check it at this moment
     size_t row_size = std::max(block->rows(), _column_ptr->size());
     *result_column_id = VExpr::insert_param(block, {_column_ptr, _data_type, _expr_name}, row_size);
     return Status::OK();
@@ -86,5 +90,25 @@ std::string VLiteral::debug_string() const {
     return out.str();
 }
 
-} // namespace vectorized
-} // namespace doris
+bool VLiteral::equals(const VExpr& other) {
+    const auto* other_ptr = dynamic_cast<const VLiteral*>(&other);
+    if (!other_ptr) {
+        return false;
+    }
+    if (this->_expr_name != other_ptr->_expr_name) {
+        return false;
+    }
+    if (this->_column_ptr->structure_equals(*other_ptr->_column_ptr)) {
+        if (this->_column_ptr->size() != other_ptr->_column_ptr->size()) {
+            return false;
+        }
+        for (size_t i = 0; i < this->_column_ptr->size(); i++) {
+            if (this->_column_ptr->compare_at(i, i, *other_ptr->_column_ptr, -1) != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace doris::vectorized
