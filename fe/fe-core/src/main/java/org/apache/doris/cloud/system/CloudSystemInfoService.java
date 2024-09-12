@@ -24,6 +24,7 @@ import org.apache.doris.cloud.proto.Cloud;
 import org.apache.doris.cloud.proto.Cloud.ClusterPB;
 import org.apache.doris.cloud.proto.Cloud.InstanceInfoPB;
 import org.apache.doris.cloud.rpc.MetaServiceProxy;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
@@ -281,20 +282,29 @@ public class CloudSystemInfoService extends SystemInfoService {
             LOG.debug("updateCloudFrontends toAdd={} toDel={}", toAdd, toDel);
         }
         String masterIp = Env.getCurrentEnv().getMasterHost();
-        for (Frontend fe : toAdd) {
-            if (masterIp.equals(fe.getHost())) {
-                continue;
-            }
-            Env.getCurrentEnv().addFrontend(FrontendNodeType.OBSERVER,
-                    fe.getHost(), fe.getEditLogPort(), fe.getNodeName());
-            LOG.info("added cloud frontend={} ", fe);
-        }
         for (Frontend fe : toDel) {
             if (masterIp.equals(fe.getHost())) {
                 continue;
             }
-            Env.getCurrentEnv().dropFrontend(FrontendNodeType.OBSERVER, fe.getHost(), fe.getEditLogPort());
-            LOG.info("dropped cloud frontend={} ", fe);
+            try {
+                Env.getCurrentEnv().dropFrontend(fe.getRole(), fe.getHost(), fe.getEditLogPort());
+                LOG.info("dropped cloud frontend={} ", fe);
+            } catch (DdlException e) {
+                LOG.warn("failed to drop cloud frontend={} ", fe);
+            }
+        }
+
+        for (Frontend fe : toAdd) {
+            if (masterIp.equals(fe.getHost())) {
+                continue;
+            }
+            try {
+                Env.getCurrentEnv().addFrontend(fe.getRole(),
+                        fe.getHost(), fe.getEditLogPort(), fe.getNodeName());
+                LOG.info("added cloud frontend={} ", fe);
+            } catch (DdlException e) {
+                LOG.warn("failed to add cloud frontend={} ", fe);
+            }
         }
     }
 
@@ -368,25 +378,18 @@ public class CloudSystemInfoService extends SystemInfoService {
     }
 
     @Override
-    public List<Backend> getBackendsByCurrentCluster() throws UserException {
+    public ImmutableMap<Long, Backend> getBackendsByCurrentCluster() throws AnalysisException {
         ConnectContext ctx = ConnectContext.get();
         if (ctx == null) {
-            throw new UserException("connect context is null");
+            throw new AnalysisException("connect context is null");
         }
 
         String cluster = ctx.getCurrentCloudCluster();
         if (Strings.isNullOrEmpty(cluster)) {
-            throw new UserException("cluster name is empty");
+            throw new AnalysisException("cluster name is empty");
         }
 
-        //((CloudEnv) Env.getCurrentEnv()).checkCloudClusterPriv(cluster);
-
-        return getBackendsByClusterName(cluster);
-    }
-
-    @Override
-    public ImmutableMap<Long, Backend> getBackendsWithIdByCurrentCluster() throws UserException {
-        List<Backend> backends = getBackendsByCurrentCluster();
+        List<Backend> backends =  getBackendsByClusterName(cluster);
         Map<Long, Backend> idToBackend = Maps.newHashMap();
         for (Backend be : backends) {
             idToBackend.put(be.getId(), be);
@@ -734,20 +737,20 @@ public class CloudSystemInfoService extends SystemInfoService {
         return cloudClusterTypeAndName.clusterName;
     }
 
-    public void waitForAutoStart(String clusterName) throws DdlException {
+    public String waitForAutoStart(String clusterName) throws DdlException {
         if (Config.isNotCloudMode()) {
-            return;
+            return null;
         }
         clusterName = getClusterNameAutoStart(clusterName);
         if (Strings.isNullOrEmpty(clusterName)) {
             LOG.warn("auto start in cloud mode, but clusterName empty {}", clusterName);
-            return;
+            return null;
         }
         String clusterStatus = getCloudStatusByName(clusterName);
         if (Strings.isNullOrEmpty(clusterStatus)) {
             // for cluster rename or cluster dropped
             LOG.warn("cant find clusterStatus in fe, clusterName {}", clusterName);
-            return;
+            return null;
         }
 
         if (Cloud.ClusterStatus.valueOf(clusterStatus) == Cloud.ClusterStatus.MANUAL_SHUTDOWN) {
@@ -762,7 +765,7 @@ public class CloudSystemInfoService extends SystemInfoService {
             // root ? see StatisticsUtil.buildConnectContext
             if (ConnectContext.get() != null && ConnectContext.get().getUserIdentity().isRootUser()) {
                 LOG.warn("auto start daemon thread run in root, not resume cluster {}-{}", clusterName, clusterStatus);
-                return;
+                return null;
             }
             Cloud.AlterClusterRequest.Builder builder = Cloud.AlterClusterRequest.newBuilder();
             builder.setCloudUniqueId(Config.cloud_unique_id);
@@ -791,7 +794,8 @@ public class CloudSystemInfoService extends SystemInfoService {
         StopWatch stopWatch = new StopWatch();
         stopWatch.start();
         boolean hasAutoStart = false;
-        while (!String.valueOf(Cloud.ClusterStatus.NORMAL).equals(clusterStatus)
+        boolean existAliveBe = true;
+        while ((!String.valueOf(Cloud.ClusterStatus.NORMAL).equals(clusterStatus) || !existAliveBe)
             && retryTime < retryTimes) {
             hasAutoStart = true;
             ++retryTime;
@@ -809,6 +813,8 @@ public class CloudSystemInfoService extends SystemInfoService {
                 LOG.info("change cluster sleep wait InterruptedException: ", e);
             }
             clusterStatus = getCloudStatusByName(clusterName);
+            // Check that the bes node in the cluster have at least one alive
+            existAliveBe = getBackendsByClusterName(clusterName).stream().anyMatch(Backend::isAlive);
         }
         if (retryTime >= retryTimes) {
             // auto start timeout
@@ -821,5 +827,6 @@ public class CloudSystemInfoService extends SystemInfoService {
         if (hasAutoStart) {
             LOG.info("auto start cluster {}, start cost {} ms", clusterName, stopWatch.getTime());
         }
+        return clusterName;
     }
 }

@@ -215,16 +215,12 @@ public class OlapTableSink extends DataSink {
 
         tSink.setTableId(dstTable.getId());
         tSink.setTupleId(tupleDescriptor.getId().asInt());
-        int numReplicas = 1;
-        for (Partition partition : dstTable.getPartitions()) {
-            numReplicas = dstTable.getPartitionInfo().getReplicaAllocation(partition.getId()).getTotalReplicaNum();
-            break;
-        }
+        int numReplicas = dstTable.getTableProperty().getReplicaAllocation().getTotalReplicaNum();
         tSink.setNumReplicas(numReplicas);
         tSink.setNeedGenRollup(dstTable.shouldLoadToNewRollup());
         tSink.setSchema(createSchema(tSink.getDbId(), dstTable, analyzer));
         tSink.setPartition(createPartition(tSink.getDbId(), dstTable, analyzer));
-        List<TOlapTableLocationParam> locationParams = createLocation(dstTable);
+        List<TOlapTableLocationParam> locationParams = createLocation(tSink.getDbId(), dstTable);
         tSink.setLocation(locationParams.get(0));
         if (singleReplicaLoad) {
             tSink.setSlaveLocation(locationParams.get(1));
@@ -242,6 +238,7 @@ public class OlapTableSink extends DataSink {
         }
         strBuilder.append(prefix + "  TUPLE ID: " + tupleDescriptor.getId() + "\n");
         strBuilder.append(prefix + "  " + DataPartition.RANDOM.getExplainString(explainLevel));
+        strBuilder.append(prefix + "  IS_PARTIAL_UPDATE: " + isPartialUpdate);
         return strBuilder.toString();
     }
 
@@ -616,7 +613,7 @@ public class OlapTableSink extends DataSink {
         return Arrays.asList(locationParam, slaveLocationParam);
     }
 
-    public List<TOlapTableLocationParam> createLocation(OlapTable table) throws UserException {
+    public List<TOlapTableLocationParam> createLocation(long dbId, OlapTable table) throws UserException {
         if (table.getPartitionInfo().enableAutomaticPartition() && partitionIds.isEmpty()) {
             return createDummyLocation(table);
         }
@@ -649,6 +646,14 @@ public class OlapTableSink extends DataSink {
                                 + ", detail: " + tablet.getDetailsStatusForQuery(visibleVersion);
                         if (Config.isCloudMode()) {
                             errMsg += ConnectContext.cloudNoBackendsReason();
+                        } else {
+                            long now = System.currentTimeMillis();
+                            long lastLoadFailedTime = tablet.getLastLoadFailedTime();
+                            tablet.setLastLoadFailedTime(now);
+                            if (now - lastLoadFailedTime >= 5000L) {
+                                Env.getCurrentEnv().getTabletScheduler().tryAddRepairTablet(
+                                        tablet, dbId, table, partition, index, 0);
+                            }
                         }
                         throw new UserException(InternalErrorCode.REPLICA_FEW_ERR, errMsg);
                     }

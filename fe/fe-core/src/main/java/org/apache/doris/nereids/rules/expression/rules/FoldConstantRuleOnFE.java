@@ -43,6 +43,7 @@ import org.apache.doris.nereids.trees.expressions.InPredicate;
 import org.apache.doris.nereids.trees.expressions.IsNull;
 import org.apache.doris.nereids.trees.expressions.LessThan;
 import org.apache.doris.nereids.trees.expressions.LessThanEqual;
+import org.apache.doris.nereids.trees.expressions.Match;
 import org.apache.doris.nereids.trees.expressions.Not;
 import org.apache.doris.nereids.trees.expressions.NullSafeEqual;
 import org.apache.doris.nereids.trees.expressions.Or;
@@ -62,6 +63,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.Date;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.EncryptKeyRef;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.If;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Password;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.SessionUser;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.User;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Version;
 import org.apache.doris.nereids.trees.expressions.literal.ArrayLiteral;
@@ -90,6 +92,7 @@ import com.google.common.collect.ImmutableList.Builder;
 import com.google.common.collect.Lists;
 import org.apache.commons.codec.digest.DigestUtils;
 
+import java.time.DateTimeException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -163,7 +166,8 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
                 matches(Password.class, this::visitPassword),
                 matches(Array.class, this::visitArray),
                 matches(Date.class, this::visitDate),
-                matches(Version.class, this::visitVersion)
+                matches(Version.class, this::visitVersion),
+                matches(SessionUser.class, this::visitSessionUser)
         );
     }
 
@@ -188,6 +192,16 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
     @Override
     public Expression visitLiteral(Literal literal, ExpressionRewriteContext context) {
         return literal;
+    }
+
+    @Override
+    public Expression visitMatch(Match match, ExpressionRewriteContext context) {
+        match = rewriteChildren(match, context);
+        Optional<Expression> checkedExpr = preProcess(match);
+        if (checkedExpr.isPresent()) {
+            return checkedExpr.get();
+        }
+        return super.visitMatch(match, context);
     }
 
     @Override
@@ -316,6 +330,12 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
     }
 
     @Override
+    public Expression visitSessionUser(SessionUser user, ExpressionRewriteContext context) {
+        String res = context.cascadesContext.getConnectContext().getUserIdentity().toString();
+        return new VarcharLiteral(res);
+    }
+
+    @Override
     public Expression visitConnectionId(ConnectionId connectionId, ExpressionRewriteContext context) {
         return new BigIntLiteral(context.cascadesContext.getConnectContext().getConnectionId());
     }
@@ -424,6 +444,8 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
                     // If cast is from type coercion, we don't use NULL literal and will throw exception.
                     throw t;
                 }
+            } catch (DateTimeException e) {
+                return new NullLiteral(dataType);
             }
         }
         try {

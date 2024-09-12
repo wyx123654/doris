@@ -80,7 +80,8 @@ Status RowIDFetcher::init() {
         if (!client) {
             LOG(WARNING) << "Get rpc stub failed, host=" << node_info.host
                          << ", port=" << node_info.brpc_port;
-            return Status::InternalError("RowIDFetcher failed to init rpc client");
+            return Status::InternalError("RowIDFetcher failed to init rpc client, host={}, port={}",
+                                         node_info.host, node_info.brpc_port);
         }
         _stubs.push_back(client);
     }
@@ -381,6 +382,7 @@ Status RowIdStorageReader::read_by_rowids(const PMultiGetRequest& request,
                     << ", row_size:" << row_size;
             *response->add_row_locs() = row_loc;
         });
+        // TODO: supoort session variable enable_page_cache and disable_file_cache if necessary.
         SegmentCacheHandle segment_cache;
         RETURN_IF_ERROR(scope_timer_run(
                 [&]() {
